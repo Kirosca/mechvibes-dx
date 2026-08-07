@@ -1,8 +1,10 @@
 use crate::libs::audio::AudioContext;
+use crate::state::config::AppConfig;
 use crate::utils::config::use_config;
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use lucide_dioxus::{ Check, ChevronDown, Keyboard, Mouse, Music, Search };
+use lucide_dioxus::{ Check, ChevronDown, Keyboard, Mouse, Music, Search, Shuffle };
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,18 +24,60 @@ pub struct SoundpackSelectorProps {
 #[component]
 pub fn SoundpackSelector(props: SoundpackSelectorProps) -> Element {
     rsx! {
-      div { class: "space-y-2",
-        div { class: "flex items-center gap-2 text-sm font-bold text-base-content/80",
-          span { class: "text-primary", {props.icon} }
-          "{props.label}"
+        SoundpackDropdown {
+            soundpack_type: props.soundpack_type,
+            icon: props.icon,
+            label: props.label,
         }
-        SoundpackDropdown { soundpack_type: props.soundpack_type }
-      }
     }
 }
 
+/// Persists the chosen soundpack to config, then loads it into the audio
+/// engine asynchronously. Shared by the dropdown list and the randomize button.
+fn activate_soundpack(
+    soundpack_type: SelectorType,
+    pack_id: String,
+    audio_ctx: Arc<AudioContext>,
+    update_config: Rc<dyn Fn(Box<dyn FnOnce(&mut AppConfig)>)>,
+    mut error: Signal<String>,
+    mut is_loading: Signal<bool>
+) {
+    error.set(String::new());
+    let pack_id_config = pack_id.clone();
+    update_config(
+        Box::new(move |config| {
+            match soundpack_type {
+                SelectorType::Keyboard => {
+                    config.keyboard_soundpack = pack_id_config;
+                }
+                SelectorType::Mouse => {
+                    config.mouse_soundpack = pack_id_config;
+                }
+            }
+        })
+    );
+    spawn(async move {
+        is_loading.set(true);
+        Delay::new(Duration::from_millis(1)).await;
+        let result = match soundpack_type {
+            SelectorType::Keyboard => {
+                crate::libs::audio::load_keyboard_soundpack(&audio_ctx, &pack_id)
+            }
+            SelectorType::Mouse => { crate::libs::audio::load_mouse_soundpack(&audio_ctx, &pack_id) }
+        };
+        if let Err(e) = result {
+            let type_str = match soundpack_type {
+                SelectorType::Keyboard => "keyboard",
+                SelectorType::Mouse => "mouse",
+            };
+            error.set(format!("Failed to load {} soundpack: {}", type_str, e));
+        }
+        is_loading.set(false);
+    });
+}
+
 #[component]
-fn SoundpackDropdown(soundpack_type: SelectorType) -> Element {
+fn SoundpackDropdown(soundpack_type: SelectorType, icon: Element, label: String) -> Element {
     // Use audio context from the layout provider
     let audio_ctx: Arc<AudioContext> = use_context();
 
@@ -130,8 +174,57 @@ fn SoundpackDropdown(soundpack_type: SelectorType) -> Element {
             })
     });
 
+    // Packs of this type other than the active one — the pool the randomize
+    // button picks from
+    let random_candidates = use_memo(move || {
+        soundpacks()
+            .into_iter()
+            .filter(|pack| {
+                match soundpack_type {
+                    SelectorType::Keyboard =>
+                        pack.soundpack_type == crate::state::soundpack::SoundpackType::Keyboard,
+                    SelectorType::Mouse =>
+                        pack.soundpack_type == crate::state::soundpack::SoundpackType::Mouse,
+                }
+            })
+            .map(|pack| pack.folder_path)
+            .filter(|path| *path != current())
+            .collect::<Vec<_>>()
+    });
+
     rsx! {
       div { class: "space-y-2",
+        div { class: "flex items-center justify-between text-sm font-bold text-base-content/80",
+          div { class: "flex items-center gap-2",
+            span { class: "text-primary", {icon} }
+            "{label}"
+          }
+          button {
+            class: "btn btn-ghost btn-xs btn-circle",
+            title: "Pick a random sound pack",
+            disabled: is_loading() || random_candidates.read().is_empty(),
+            onclick: {
+                let audio_ctx = audio_ctx.clone();
+                let update_config = update_config.clone();
+                move |_| {
+                    let candidates = random_candidates();
+                    if candidates.is_empty() {
+                        return;
+                    }
+                    let pack_id = candidates[rand::random_range(0..candidates.len())].clone();
+                    activate_soundpack(
+                        soundpack_type,
+                        pack_id,
+                        audio_ctx.clone(),
+                        update_config.clone(),
+                        error,
+                        is_loading,
+                    );
+                }
+            },
+            Shuffle { class: "w-3.5 h-3.5" }
+          }
+        }
         div { class: "relative w-full",
           // Dropdown toggle button
           button {
@@ -234,71 +327,21 @@ fn SoundpackDropdown(soundpack_type: SelectorType) -> Element {
                       // Use folder_path for comparison
                       onclick: {
                           let pack_id = pack.folder_path.clone();
-                          let mut error = error.clone();
-                          let soundpacks = soundpacks.clone();
                           let mut is_open = is_open.clone();
                           let mut search_query = search_query.clone();
-                          let is_loading = is_loading.clone();
                           let audio_ctx = audio_ctx.clone();
                           let update_config = update_config.clone();
-                          let soundpack_type_click = soundpack_type.clone();
                           move |_| {
                               is_open.set(false);
                               search_query.set(String::new());
-                              error.set(String::new());
-                              if let Some(_) = soundpacks().iter().find(|p| p.folder_path == pack_id) {
-                                  let pack_id_clone = pack_id.clone();
-                                  let soundpack_type_clone = soundpack_type_click.clone();
-                                  update_config(
-                                      Box::new(move |config| {
-                                          match soundpack_type_clone {
-                                              SelectorType::Keyboard => {
-                                                  config.keyboard_soundpack = pack_id_clone;
-                                              }
-                                              SelectorType::Mouse => {
-                                                  config.mouse_soundpack = pack_id_clone;
-                                              }
-                                          }
-                                      }),
-                                  );
-                                  let pack_id_async = pack_id.clone();
-                                  let audio_ctx_async = audio_ctx.clone();
-                                  let mut error_async = error.clone();
-                                  let mut is_loading_async = is_loading.clone();
-                                  let soundpack_type_async = soundpack_type_click.clone();
-                                  spawn(async move {
-                                      is_loading_async.set(true);
-                                      Delay::new(Duration::from_millis(1)).await;
-                                      let result = match soundpack_type_async {
-                                          SelectorType::Keyboard => {
-                                              crate::libs::audio::load_keyboard_soundpack(
-                                                  &audio_ctx_async,
-                                                  &pack_id_async,
-                                              )
-                                          }
-                                          SelectorType::Mouse => {
-                                              crate::libs::audio::load_mouse_soundpack(
-                                                  &audio_ctx_async,
-                                                  &pack_id_async,
-                                              )
-                                          }
-                                      };
-                                      match result {
-                                          Ok(_) => {}
-                                          Err(e) => {
-                                              let type_str = match soundpack_type_async {
-                                                  SelectorType::Keyboard => "keyboard",
-                                                  SelectorType::Mouse => "mouse",
-                                              };
-                                              error_async
-                                                  .set(
-                                                      format!("Failed to load {} soundpack: {}", type_str, e),
-                                                  );
-                                          }
-                                      }
-                                      is_loading_async.set(false);
-                                  });
-                              }
+                              activate_soundpack(
+                                  soundpack_type,
+                                  pack_id.clone(),
+                                  audio_ctx.clone(),
+                                  update_config.clone(),
+                                  error,
+                                  is_loading,
+                              );
                           }
                       },
                       div { class: "flex items-center justify-between gap-3 ",
