@@ -802,7 +802,15 @@ fn load_audio_file_samples(
     Ok((samples, channels, sample_rate))
 }
 
-/// Convert audio format (sample rate and channel count)
+/// Convert interleaved PCM to a target channel count and sample rate.
+///
+/// Both conversions are real. Skipping the rate conversion and returning the
+/// raw samples would silently mislabel them: the concatenated output carries a
+/// single declared sample rate, so a 22050Hz clip left untouched inside a
+/// 44100Hz file plays back at double speed - one octave up.
+///
+/// Channels are converted first so the resampler operates on frames that
+/// already have the destination layout.
 fn convert_audio_format(
     samples: &[f32],
     from_channels: u16,
@@ -810,34 +818,65 @@ fn convert_audio_format(
     to_channels: u16,
     to_sample_rate: u32
 ) -> Vec<f32> {
-    // Simple conversion - just handle channel conversion for now
-    // Sample rate conversion would require more complex resampling
-
     if from_channels == to_channels && from_sample_rate == to_sample_rate {
         return samples.to_vec();
     }
 
-    // Convert channels
-    let channel_converted = if from_channels == 1 && to_channels == 2 {
-        // Mono to stereo: duplicate each sample
-        samples
+    let channel_converted = convert_channels(samples, from_channels, to_channels);
+
+    if from_sample_rate == to_sample_rate {
+        return channel_converted;
+    }
+
+    crate::libs::audio::resampler::resample_interleaved(
+        &channel_converted,
+        to_channels.max(1),
+        from_sample_rate,
+        to_sample_rate
+    )
+}
+
+/// Remap interleaved PCM from `from_channels` to `to_channels`, preserving the
+/// frame count. Layouts beyond mono/stereo are folded down by averaging every
+/// source frame, then re-spread - crude, but it keeps the frame count (and so
+/// the duration) honest instead of passing through a buffer whose interleaving
+/// no longer matches the declared channel count.
+fn convert_channels(samples: &[f32], from_channels: u16, to_channels: u16) -> Vec<f32> {
+    let from = from_channels.max(1) as usize;
+    let to = to_channels.max(1) as usize;
+
+    if from == to {
+        return samples.to_vec();
+    }
+
+    if from == 1 && to == 2 {
+        // Mono to stereo: duplicate each sample into both channels.
+        return samples
             .iter()
-            .flat_map(|&sample| vec![sample, sample])
-            .collect()
-    } else if from_channels == 2 && to_channels == 1 {
-        // Stereo to mono: average each pair
-        samples
+            .flat_map(|&sample| [sample, sample])
+            .collect();
+    }
+
+    if from == 2 && to == 1 {
+        // Stereo to mono: average each pair.
+        return samples
             .chunks(2)
             .map(|chunk| {
                 if chunk.len() == 2 { (chunk[0] + chunk[1]) / 2.0 } else { chunk[0] }
             })
-            .collect()
-    } else {
-        samples.to_vec()
-    };
+            .collect();
+    }
 
-    // For now, ignore sample rate conversion (would need proper resampling)
-    channel_converted
+    // General case: average each source frame down to one value, then write
+    // that value to every destination channel.
+    let mut out = Vec::with_capacity((samples.len() / from) * to);
+    for frame in samples.chunks(from) {
+        let mono = frame.iter().sum::<f32>() / (frame.len() as f32);
+        for _ in 0..to {
+            out.push(mono);
+        }
+    }
+    out
 }
 
 /// Save audio samples to file
@@ -1095,7 +1134,7 @@ fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::back_up_existing_file;
+    use super::{ back_up_existing_file, concatenate_audio_files_with_timing, convert_audio_format };
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env
@@ -1103,6 +1142,163 @@ mod tests {
             .join(format!("mechvibes-converter-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    /// Write a synthetic sine-tone WAV so the mixed-rate tests need no binary
+    /// fixtures checked into the repo.
+    fn write_tone_wav(
+        path: &std::path::Path,
+        sample_rate: u32,
+        channels: u16,
+        duration_ms: u32
+    ) {
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create wav");
+        let frame_count = ((sample_rate as u64) * (duration_ms as u64)) / 1000;
+        for frame in 0..frame_count {
+            let t = (frame as f32) / (sample_rate as f32);
+            let value = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5;
+            let sample = (value * (i16::MAX as f32)) as i16;
+            for _ in 0..channels {
+                writer.write_sample(sample).expect("write sample");
+            }
+        }
+        writer.finalize().expect("finalize wav");
+    }
+
+    /// Frames actually present in the written WAV, read back rather than
+    /// inferred - this is what playback will see.
+    fn wav_frames(path: &std::path::Path) -> (u32, u16, usize) {
+        let reader = hound::WavReader::open(path).expect("open wav");
+        let spec = reader.spec();
+        let frames = (reader.len() as usize) / (spec.channels.max(1) as usize);
+        (spec.sample_rate, spec.channels, frames)
+    }
+
+    /// The pitch bug in its smallest form: a clip whose native rate differs
+    /// from the destination must come back with the frame count the
+    /// destination rate implies. Returning the raw samples instead - the old
+    /// behaviour - leaves half as many frames, which the concatenated file
+    /// then plays at double speed, one octave up.
+    #[test]
+    fn a_lower_rate_clip_is_resampled_up_to_the_reference_rate() {
+        let frames_at_22050 = 2205; // 100ms
+        let samples = vec![0.0f32; frames_at_22050];
+
+        let converted = convert_audio_format(&samples, 1, 22_050, 1, 44_100);
+
+        let expected = 4410; // the same 100ms at 44100Hz
+        let diff = (converted.len() as i64 - expected).unsigned_abs() as usize;
+        assert!(
+            diff <= 2,
+            "expected ~{} frames at the reference rate, got {} (samples passed through unresampled?)",
+            expected,
+            converted.len()
+        );
+    }
+
+    /// Channel conversion and rate conversion have to happen in the same pass;
+    /// a mono clip landing in a stereo pack must end up with both the right
+    /// interleaving and the right frame count.
+    #[test]
+    fn a_mono_lower_rate_clip_becomes_stereo_at_the_reference_rate() {
+        let frames_at_22050 = 2205; // 100ms mono
+        let samples = vec![0.25f32; frames_at_22050];
+
+        let converted = convert_audio_format(&samples, 1, 22_050, 2, 44_100);
+
+        let frames = converted.len() / 2;
+        let expected_frames = 4410;
+        let diff = (frames as i64 - expected_frames).unsigned_abs() as usize;
+        assert!(
+            diff <= 2,
+            "expected ~{} stereo frames, got {} (len {})",
+            expected_frames,
+            frames,
+            converted.len()
+        );
+        assert_eq!(converted.len() % 2, 0, "a stereo buffer must hold whole frames");
+    }
+
+    /// End to end through the concatenation path: the second file is sourced
+    /// at half the reference rate, exactly the mixed-rate pack that produced
+    /// the high-pitched nav keys. Its slice must occupy its real duration in
+    /// the concatenated file, and the reported timing must match.
+    #[test]
+    fn a_mixed_rate_pack_concatenates_without_shrinking_the_odd_clip() {
+        let dir = temp_dir("mixed-rate");
+        write_tone_wav(&dir.join("letters.wav"), 44_100, 1, 100);
+        write_tone_wav(&dir.join("delete.wav"), 22_050, 1, 100);
+
+        let timing = concatenate_audio_files_with_timing(
+            &["letters.wav".to_string(), "delete.wav".to_string()],
+            dir.to_str().expect("utf8 dir"),
+            "concatenated_audio.wav"
+        ).expect("concatenation must succeed");
+
+        let (offset, duration) = *timing.get("delete.wav").expect("delete.wav timing");
+        assert!(
+            (offset - 100.0).abs() < 1.0,
+            "delete.wav should start after letters.wav's 100ms, got {:.2}ms",
+            offset
+        );
+        assert!(
+            (duration - 100.0).abs() < 1.0,
+            "delete.wav is 100ms of audio; a reported {:.2}ms means it was written \
+             unresampled and will play back pitched",
+            duration
+        );
+
+        let (rate, channels, frames) = wav_frames(&dir.join("concatenated_audio.wav"));
+        assert_eq!(rate, 44_100, "the reference rate sets the output rate");
+        assert_eq!(channels, 1);
+        let expected_frames = 4410 * 2; // 200ms total at the reference rate
+        let diff = (frames as i64 - expected_frames).unsigned_abs() as usize;
+        assert!(
+            diff <= 4,
+            "expected ~{} frames for 200ms at 44100Hz, got {}",
+            expected_frames,
+            frames
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same path with a mono clip joining a stereo reference: frame count
+    /// must stay honest once both the layout and the rate are converted.
+    #[test]
+    fn a_mono_clip_joining_a_stereo_pack_keeps_its_duration() {
+        let dir = temp_dir("mono-into-stereo");
+        write_tone_wav(&dir.join("letters.wav"), 44_100, 2, 100);
+        write_tone_wav(&dir.join("delete.wav"), 22_050, 1, 100);
+
+        let timing = concatenate_audio_files_with_timing(
+            &["letters.wav".to_string(), "delete.wav".to_string()],
+            dir.to_str().expect("utf8 dir"),
+            "concatenated_audio.wav"
+        ).expect("concatenation must succeed");
+
+        let (offset, duration) = *timing.get("delete.wav").expect("delete.wav timing");
+        assert!((offset - 100.0).abs() < 1.0, "unexpected offset {:.2}ms", offset);
+        assert!(
+            (duration - 100.0).abs() < 1.0,
+            "a mono 22050Hz clip in a stereo 44100Hz pack should still report 100ms, got {:.2}ms",
+            duration
+        );
+
+        let (rate, channels, frames) = wav_frames(&dir.join("concatenated_audio.wav"));
+        assert_eq!(rate, 44_100);
+        assert_eq!(channels, 2, "the reference layout sets the output layout");
+        let expected_frames = 4410 * 2;
+        let diff = (frames as i64 - expected_frames).unsigned_abs() as usize;
+        assert!(diff <= 4, "expected ~{} stereo frames, got {}", expected_frames, frames);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The destructive case: a pack that already ships its own
