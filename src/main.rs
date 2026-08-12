@@ -292,11 +292,14 @@ fn main() {
     let (window_tx, _window_rx) = mpsc::channel::<WindowAction>();
     WINDOW_MANAGER.set_action_sender(window_tx);
 
-    // Window dimensions - allow vertical resizing
-    let window_width = 470;
-    let min_height = 600;   // Minimum height for compact mode
-    let default_height = 820; // Default height
-    let max_height = 820;  // Maximum height
+    // Window dimensions - allow vertical resizing.
+    //
+    // These are a starting point, not the final geometry: the window is
+    // measured against its monitor's work area and shrunk to fit once it
+    // exists (see `libs::window_bounds`), because an 820pt window is taller
+    // than a 1366x768 laptop's usable screen.
+    let (window_width, default_height) = libs::window_bounds::DEFAULT_WINDOW_SIZE;
+    let min_height = libs::window_bounds::MIN_WINDOW_SIZE.1;
 
     // Load icon before creating window
     let window_icon = load_icon();
@@ -315,7 +318,6 @@ fn main() {
             .with_always_on_top(false)
             .with_inner_size(LogicalSize::new(window_width, default_height))
             .with_min_inner_size(LogicalSize::new(window_width, min_height))
-            .with_max_inner_size(LogicalSize::new(window_width, max_height))
             .with_fullscreen(None)
             .with_decorations(false)
             .with_resizable(true)
@@ -331,7 +333,6 @@ fn main() {
         .with_always_on_top(false) // Allow normal window behavior for taskbar
         .with_inner_size(LogicalSize::new(window_width, default_height))
         .with_min_inner_size(LogicalSize::new(window_width, min_height))
-        .with_max_inner_size(LogicalSize::new(window_width, max_height))
         .with_fullscreen(None)
         .with_decorations(false) // Use custom title bar
         .with_resizable(true) // Enable vertical resizing

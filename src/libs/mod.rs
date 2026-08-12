@@ -11,6 +11,7 @@ pub mod trace;
 pub mod tray;
 pub mod tray_service;
 pub mod ui;
+pub mod window_bounds;
 pub mod window_manager;
 
 #[cfg(target_os = "linux")]

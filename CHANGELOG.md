@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The window now opens fully on screen, whatever your display.** On a 1366x768 laptop the app was taller than the usable screen, so the dock and the buttons above it sat below the bottom edge and could not be reached. On some machines the window also opened partly outside the desktop entirely, with no way to drag it back because the title bar itself was off screen. The window is now measured against the work area of the monitor it opens on, shrunk to fit if it is too tall, and centred there. Display scaling at 125% and 150% is accounted for, the taskbar is excluded from the space considered usable, and monitors sitting left of or above the primary one are handled. When the window is shortened, the content scrolls instead of being cut off.
+
 - **Ambiance sounds now play on installed Linux builds.** Rain, forest, campfire and the rest opened their audio files relative to whatever folder the app happened to be launched from, so on the `.deb` and the AppImage they were never found and the toggles did nothing. The bundled sounds are now located the same way soundpacks already were: inside the AppImage's own mount for AppImage users, under `/usr/lib/mechvibes-dx/assets` for the `.deb`, and beside the app everywhere else. When a sound genuinely cannot be opened, the error now names the exact path it tried.
 
 ## [0.8.1] - 2026-08-06

@@ -21,6 +21,24 @@ pub fn WindowController() -> Element {
     // state until some unrelated write happened to republish it.
     let (_config, update_config) = crate::utils::config::use_config();
 
+    // Bring the window inside the screen before anything else runs.
+    //
+    // This cannot happen at build time in `main.rs`: which monitor the window
+    // opens on, and that monitor's work area and scale factor, are only known
+    // once the window exists. `use_hook` runs it exactly once per mount, on the
+    // first render, so the correction lands before the user sees the window
+    // rather than as a visible jump afterwards.
+    {
+        let window = window.clone();
+        use_hook(move || {
+            crate::libs::window_bounds::fit_window_to_monitor(
+                &window,
+                crate::libs::window_bounds::DEFAULT_WINDOW_SIZE,
+                crate::libs::window_bounds::MIN_WINDOW_SIZE
+            );
+        });
+    }
+
     // Create a static receiver for window actions
     let mut window_action_receiver = use_signal(|| None::<mpsc::Receiver<WindowAction>>); // Create a signal to hold the tray manager
     let mut tray_manager = use_signal(|| None::<TrayManager>);
