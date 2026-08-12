@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Ambiance sounds now play on installed Linux builds.** Rain, forest, campfire and the rest opened their audio files relative to whatever folder the app happened to be launched from, so on the `.deb` and the AppImage they were never found and the toggles did nothing. The bundled sounds are now located the same way soundpacks already were: inside the AppImage's own mount for AppImage users, under `/usr/lib/mechvibes-dx/assets` for the `.deb`, and beside the app everywhere else. When a sound genuinely cannot be opened, the error now names the exact path it tried.
+
 ## [0.8.1] - 2026-08-06
 
 ### Added

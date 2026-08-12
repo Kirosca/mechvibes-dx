@@ -87,10 +87,13 @@ fn build_ambiance_sink(
     audio_url: &str,
     volume: f32
 ) -> Result<Sink, String> {
-    let audio_path = audio_url.replace("assets/", "");
-    let full_path = format!("assets/{}", audio_path);
+    // `audio_url` is the web-style "assets/sounds/x.mp3" string the sound list
+    // stores; the resolver turns it into the real on-disk location, which is
+    // beside the executable on Windows/macOS but under /usr/lib on a Linux
+    // install where the process cwd is wherever the user launched from.
+    let full_path = crate::state::paths::bundled_assets::asset_path(audio_url);
     let file = File::open(&full_path).map_err(|e|
-        format!("Failed to open audio file {}: {}", full_path, e)
+        format!("Failed to open audio file {}: {}", full_path.display(), e)
     )?;
     let decoder = Decoder::new(BufReader::new(file)).map_err(|e|
         format!("Failed to decode audio: {}", e)

@@ -111,6 +111,41 @@ fn appimage_root(exe_path: &Path) -> Option<PathBuf> {
     Some(app_dir.to_path_buf())
 }
 
+/// Pick the first candidate directory that exists, else the last one.
+///
+/// Shared by every read-only resource root in this module (soundpacks,
+/// bundled assets). Each caller supplies its candidates already in priority
+/// order, and the final entry is the unconditional fallback: returning it even
+/// when it does not exist is what lets a first run on a machine with nothing
+/// installed still produce a sensible path to report in an error message,
+/// instead of an `Option` every caller would have to unwrap into the same
+/// fallback anyway.
+///
+/// `label` is only used for the one-line log the callers emit once per process.
+/// Split out so the ordering rule lives in exactly one place; the existence
+/// checks are the only filesystem access here.
+fn first_existing_dir(label: &str, candidates: &[(&str, PathBuf)]) -> PathBuf {
+    let Some(((_, last), leading)) = candidates.split_last() else {
+        // No caller does this; a caller that did would deserve a clear panic
+        // over a silently wrong path.
+        panic!("first_existing_dir needs at least one candidate for {}", label);
+    };
+
+    for (source, candidate) in leading {
+        // `is_dir()` rather than `exists()`: a plain file with the right name
+        // would otherwise be accepted as a resource root and fail later, at
+        // the first `File::open` inside it, with a much less obvious error.
+        if candidate.is_dir() {
+            crate::always_print!("📂 Using {} {} directory: {}", source, label, candidate.display());
+            return candidate.clone();
+        }
+    }
+
+    let (source, _) = &candidates[candidates.len() - 1];
+    crate::always_print!("📂 Using {} {} directory: {}", source, label, last.display());
+    last.clone()
+}
+
 /// Get the application root directory (where the executable is located)
 /// This ensures resources are found regardless of working directory
 fn get_app_root() -> &'static PathBuf {
@@ -515,40 +550,29 @@ pub mod soundpacks {
     pub fn get_builtin_soundpacks_dir() -> PathBuf {
         static BUILTIN_SOUNDPACKS_DIR: OnceLock<PathBuf> = OnceLock::new();
         BUILTIN_SOUNDPACKS_DIR.get_or_init(|| {
+            let mut candidates: Vec<(&str, PathBuf)> = Vec::new();
+
             // Inside a mounted AppImage: resolve against the AppDir, never `/`.
             if let Some(app_dir) = running_from_appimage() {
-                let bundled = app_dir.join("usr/share/mechvibes-dx/soundpacks");
-                if bundled.exists() {
-                    crate::always_print!(
-                        "📂 Using AppImage soundpacks directory: {}",
-                        bundled.display()
-                    );
-                    return bundled;
-                }
+                candidates.push(("AppImage", app_dir.join(SOUNDPACKS_SYSTEM_SUBDIR)));
             }
 
-            // Check standard Linux data directory first (for installed packages)
+            // The .deb's absolute location, checked only on Linux so a stray
+            // /usr/share on another platform cannot win.
             #[cfg(target_os = "linux")]
-            {
-                let system_soundpacks = PathBuf::from("/usr/share/mechvibes-dx/soundpacks");
-                if system_soundpacks.exists() {
-                    crate::always_print!(
-                        "📂 Using system soundpacks directory: {}",
-                        system_soundpacks.display()
-                    );
-                    return system_soundpacks;
-                }
-            }
+            candidates.push(("system", PathBuf::from("/").join(SOUNDPACKS_SYSTEM_SUBDIR)));
 
-            // Fallback to app root (for portable/dev mode)
-            let app_root_soundpacks = get_app_root().join("soundpacks");
-            crate::always_print!(
-                "📂 Using app root soundpacks directory: {}",
-                app_root_soundpacks.display()
-            );
-            app_root_soundpacks
+            // Fallback (portable/dev mode).
+            candidates.push(("app root", get_app_root().join("soundpacks")));
+
+            super::first_existing_dir("soundpacks", &candidates)
         }).clone()
     }
+
+    /// Where the `.deb` and the AppImage put the built-in soundpacks, relative
+    /// to `/` and to the AppDir respectively. One constant so the two branches
+    /// above cannot drift apart.
+    const SOUNDPACKS_SYSTEM_SUBDIR: &str = "usr/share/mechvibes-dx/soundpacks";
 
     /// Get the base soundpacks directory for custom soundpacks (system app data)
     pub fn get_custom_soundpacks_dir() -> PathBuf {
@@ -729,6 +753,196 @@ pub mod soundpacks {
         }
 
         Ok(())
+    }
+}
+
+/// Read-only files shipped inside `assets/` (the ambiance `.mp3`s and anything
+/// else opened by path at runtime rather than through `asset!()`).
+///
+/// `asset!()` files are resolved by dioxus-asset-resolver and served to the
+/// webview; these are opened by the audio engine with `File::open`, so they
+/// need the same per-packaging resolution the soundpacks already have.
+pub mod bundled_assets {
+    use super::{first_existing_dir, get_app_root, running_from_appimage};
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    /// Where the `.deb` and the AppImage put `assets/`, relative to `/` and to
+    /// the AppDir respectively.
+    ///
+    /// `usr/lib` rather than the `usr/share` the soundpacks use is not a free
+    /// choice: dioxus-asset-resolver's Linux branch scans
+    /// `current_exe()/../../lib/*/assets` for the fonts, so the packaging has
+    /// to put the directory there. See the comment on
+    /// `[package.metadata.deb]` in Cargo.toml. Reading the same directory here
+    /// keeps one copy of `assets/` in the package instead of two.
+    const ASSETS_SYSTEM_SUBDIR: &str = "usr/lib/mechvibes-dx/assets";
+
+    /// Directory holding the bundled `assets/` tree.
+    ///
+    /// Checked in order:
+    ///
+    /// 1. `{appdir}/usr/lib/mechvibes-dx/assets` (running from an AppImage)
+    /// 2. `/usr/lib/mechvibes-dx/assets` (installed via `.deb`)
+    /// 3. `{app_root}/assets` (dev, Windows portable/installed, macOS bundle)
+    ///
+    /// The AppImage check comes first and resolves **relative to the mount
+    /// point**, for the same reason the soundpack chain does: on a machine
+    /// that also has the `.deb` installed, the absolute path in step 2 exists
+    /// and belongs to the other installation, so checking it first would make
+    /// a running AppImage play the other version's files.
+    ///
+    /// Step 3 already covers three platforms because [`get_app_root`] resolves
+    /// to the cwd under `dx serve`, to the executable's directory on Windows,
+    /// and to `Contents/Resources` inside a macOS `.app`, all of which have
+    /// `assets/` directly beneath them.
+    ///
+    /// Resolved once per process, like the soundpacks directory: every input is
+    /// fixed for the run, and a sound can be (re)started on every device switch.
+    pub fn get_assets_dir() -> PathBuf {
+        static ASSETS_DIR: OnceLock<PathBuf> = OnceLock::new();
+        ASSETS_DIR.get_or_init(|| {
+            let mut candidates: Vec<(&str, PathBuf)> = Vec::new();
+
+            if let Some(app_dir) = running_from_appimage() {
+                candidates.push(("AppImage", app_dir.join(ASSETS_SYSTEM_SUBDIR)));
+            }
+
+            #[cfg(target_os = "linux")]
+            candidates.push(("system", PathBuf::from("/").join(ASSETS_SYSTEM_SUBDIR)));
+
+            candidates.push(("app root", get_app_root().join("assets")));
+
+            first_existing_dir("assets", &candidates)
+        }).clone()
+    }
+
+    /// Absolute path to one bundled asset, given its path relative to
+    /// `assets/`.
+    ///
+    /// Accepts either `"sounds/rain.mp3"` or the `"assets/sounds/rain.mp3"`
+    /// form the ambiance sound list stores (those strings double as web-facing
+    /// URLs), so callers do not each have to strip the prefix.
+    pub fn asset_path(relative: &str) -> PathBuf {
+        join_relative(get_assets_dir(), relative)
+    }
+
+    /// Joins an `assets/`-relative (or bare) resource path onto `root`.
+    ///
+    /// Split from [`asset_path`] as pure logic so the prefix handling is
+    /// unit-testable without a real assets directory. The path is joined
+    /// component by component rather than as one string so a `/`-separated
+    /// input still produces native separators on Windows.
+    fn join_relative(root: PathBuf, relative: &str) -> PathBuf {
+        let trimmed = relative.trim_start_matches(['/', '\\']);
+        let trimmed = trimmed.strip_prefix("assets/").unwrap_or(trimmed);
+
+        let mut path = root;
+        for part in trimmed.split(['/', '\\']).filter(|p| !p.is_empty()) {
+            path = path.join(part);
+        }
+        path
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::join_relative;
+        use std::path::PathBuf;
+
+        /// The form the ambiance sound list actually stores. Those strings
+        /// double as web-facing URLs, so the `assets/` prefix has to come off
+        /// before joining or the result is `.../assets/assets/sounds/rain.mp3`
+        /// - which is exactly the shape of the bug this resolver replaced.
+        #[test]
+        fn the_assets_prefix_is_not_doubled() {
+            let root = PathBuf::from("/opt/app/assets");
+            assert_eq!(
+                join_relative(root.clone(), "assets/sounds/rain.mp3"),
+                root.join("sounds").join("rain.mp3")
+            );
+        }
+
+        /// A caller that already stripped the prefix must get the same answer.
+        #[test]
+        fn a_bare_relative_path_resolves_the_same_way() {
+            let root = PathBuf::from("/opt/app/assets");
+            assert_eq!(
+                join_relative(root.clone(), "sounds/rain.mp3"),
+                root.join("sounds").join("rain.mp3")
+            );
+        }
+
+        /// A leading separator must not make the join absolute and throw the
+        /// resolved root away - `PathBuf::join` with an absolute argument
+        /// silently replaces the whole path.
+        #[test]
+        fn a_leading_separator_never_escapes_the_assets_root() {
+            let root = PathBuf::from("/opt/app/assets");
+            for input in ["/assets/sounds/rain.mp3", "/sounds/rain.mp3"] {
+                assert_eq!(
+                    join_relative(root.clone(), input),
+                    root.join("sounds").join("rain.mp3"),
+                    "failed for {}",
+                    input
+                );
+            }
+        }
+
+        /// The dev layout (`dx serve`), verified against the real repository
+        /// rather than a synthetic root: under `dx serve` the app root is the
+        /// project directory, so every built-in ambiance URL must resolve to a
+        /// file that actually exists in `assets/sounds/`.
+        ///
+        /// This is the case a pure-logic test cannot cover - it is what proves
+        /// the sounds still load in development after the resolver change, and
+        /// it fails loudly if a sound is added to the list without shipping the
+        /// file.
+        #[test]
+        fn every_builtin_ambiance_sound_exists_in_the_repository_assets() {
+            let repo_assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+            assert!(
+                repo_assets.is_dir(),
+                "the repo's assets/ directory is what dev mode resolves to"
+            );
+
+            for sound in crate::state::ambiance::AmbiancePlayerState::get_builtin_sounds() {
+                let resolved = join_relative(repo_assets.clone(), &sound.audio_url);
+                assert!(
+                    resolved.is_file(),
+                    "ambiance sound '{}' resolves to {}, which does not exist",
+                    sound.id,
+                    resolved.display()
+                );
+            }
+        }
+
+        /// The end-to-end shape the audio engine depends on: every URL in the
+        /// built-in ambiance list must turn into a path whose last two
+        /// components are `sounds/<file>.mp3` under the resolved assets root.
+        ///
+        /// Asserting the *shape* rather than "the file exists" is deliberate:
+        /// the test binary lives in `target/debug/deps`, so the resolved root
+        /// under `cargo test` is not the repo's `assets/`. What this guards is
+        /// the join itself - a regression to the old `format!("assets/{}")`
+        /// double-prefix bug shows up here on every platform.
+        #[test]
+        fn every_builtin_ambiance_url_joins_to_a_sound_under_the_assets_root() {
+            let root = PathBuf::from("/opt/app/assets");
+            let sounds = crate::state::ambiance::AmbiancePlayerState::get_builtin_sounds();
+            assert!(!sounds.is_empty(), "the built-in list must not be empty");
+
+            for sound in sounds {
+                let resolved = join_relative(root.clone(), &sound.audio_url);
+                let expected = root
+                    .join("sounds")
+                    .join(format!("{}.mp3", sound.id));
+                assert_eq!(
+                    resolved, expected,
+                    "'{}' resolved to an unexpected path",
+                    sound.audio_url
+                );
+            }
+        }
     }
 }
 
@@ -1177,6 +1391,107 @@ mod tests {
     #[test]
     fn the_windows_install_marker_is_innos_default_uninstaller_name() {
         assert_eq!(super::windows_install_marker_name(), "unins000.exe");
+    }
+
+    /// The ordering rule every read-only resource root depends on: the first
+    /// candidate that exists wins, even when a later one exists too.
+    ///
+    /// This is the AppImage case in miniature. On a machine that has the
+    /// `.deb` installed as well, both the mount-relative path and the absolute
+    /// `/usr/...` path exist, and picking the wrong one makes a running
+    /// AppImage read the other installation's files.
+    #[test]
+    fn the_first_existing_candidate_wins_over_later_ones() {
+        let root = scratch_dir("resolver-order");
+        let preferred = root.join("appimage");
+        let also_present = root.join("system");
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::create_dir_all(&also_present).unwrap();
+
+        assert_eq!(
+            super::first_existing_dir(
+                "assets",
+                &[
+                    ("AppImage", preferred.clone()),
+                    ("system", also_present),
+                    ("app root", root.join("never-reached")),
+                ]
+            ),
+            preferred
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A missing candidate is skipped rather than returned, so a `.deb` install
+    /// (no AppImage mount) still lands on the absolute system path.
+    #[test]
+    fn a_missing_candidate_falls_through_to_the_next_one() {
+        let root = scratch_dir("resolver-skip");
+        let system = root.join("system");
+        std::fs::create_dir_all(&system).unwrap();
+
+        assert_eq!(
+            super::first_existing_dir(
+                "assets",
+                &[
+                    ("AppImage", root.join("no-such-mount")),
+                    ("system", system.clone()),
+                    ("app root", root.join("never-reached")),
+                ]
+            ),
+            system
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The last candidate is the unconditional fallback: it is returned even
+    /// when nothing exists, so a first run on a machine with no install still
+    /// yields the dev/portable path to report in the error message rather than
+    /// no path at all.
+    #[test]
+    fn the_last_candidate_is_returned_even_when_nothing_exists() {
+        let root = scratch_dir("resolver-fallback");
+        let fallback = root.join("app-root");
+
+        assert_eq!(
+            super::first_existing_dir(
+                "assets",
+                &[
+                    ("AppImage", root.join("no-such-mount")),
+                    ("system", root.join("no-such-system-dir")),
+                    ("app root", fallback.clone()),
+                ]
+            ),
+            fallback
+        );
+        assert!(!fallback.exists(), "the resolver must not create anything");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file where a directory is expected must not be accepted: `exists()`
+    /// is true for both, and returning a file as a resource root would fail
+    /// later with a confusing error.
+    #[test]
+    fn a_plain_file_is_not_accepted_as_a_resource_directory() {
+        let root = scratch_dir("resolver-file");
+        let file_candidate = root.join("assets");
+        std::fs::write(&file_candidate, "").unwrap();
+        let real_dir = root.join("app-root");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        assert_eq!(
+            super::first_existing_dir(
+                "assets",
+                &[("system", file_candidate), ("app root", real_dir.clone())]
+            ),
+            real_dir,
+            "a plain file must not be accepted as a resource directory"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The two detectors describe disjoint layouts. A path can never be both,
