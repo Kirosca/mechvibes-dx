@@ -73,6 +73,8 @@ my-keyboard-pack/
 
 Timing values are `[start_ms, end_ms]` within the audio file. For "single" method, all keys reference the same audio file with different timing windows. For "multi" method, each key can use a different file.
 
+For complete documentation on config.json fields, key naming, templates, and troubleshooting, see [Soundpack Config.json V2 Format](docs/soundpack-config-v2.md).
+
 ### Classic Mechvibes packs
 
 Old V1 soundpacks (e.g., from the original Mechvibes) are auto-detected on import. The app automatically converts them to V2 format with no loss of sound quality. Your original files stay intact; a backup is kept if re-imported.
