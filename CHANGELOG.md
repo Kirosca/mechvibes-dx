@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Run without the window: `mechvibes-dx --headless`.** Starts the sounds from a terminal with no window, no tray icon and no webview, using the same keyboard capture and the same settings as the normal app. Ctrl+Alt+M still mutes, Ctrl+C exits. This also gets the app working on machines where the window itself will not open, which on Windows means a broken or missing WebView2 and on Linux a broken webkit2gtk. Add `--soundpack <name>` (and `--mouse-soundpack <name>`) to try a different pack for that run only: your saved settings are read but never written, so nothing you have set up in the app changes.
+
 ### Fixed
 
 - **Converted Mechvibes packs no longer play some keys at chipmunk pitch.** When a classic pack mixed audio files recorded at different sample rates, the converter copied the odd ones in unchanged and labeled them with the wrong rate, so keys like the arrows, Home/End, or Delete played sped up and an octave too high. The converter now properly resamples every file to a common rate (and correctly folds down packs with unusual channel layouts). Already-converted packs keep the old audio: re-import the classic pack to get the corrected sound.

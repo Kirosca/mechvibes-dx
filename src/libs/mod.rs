@@ -1,6 +1,9 @@
 pub mod audio;
+pub mod bootstrap;
+pub mod cli_args;
 pub mod device_manager;
 pub mod focused_input_listener;
+pub mod headless;
 pub mod input_device_manager;
 pub mod input_listener;
 pub mod input_manager;
@@ -21,6 +24,8 @@ pub mod evdev_input_listener;
 // (`input_worker`, driven by `rawinput_listener`) because tao/wry claims the
 // process-wide Raw Input registration in the UI process. The UI side spawns
 // and reads it via `input_worker_host`.
+#[cfg(target_os = "windows")]
+pub mod console_attach;
 #[cfg(target_os = "windows")]
 pub mod input_worker;
 #[cfg(target_os = "windows")]

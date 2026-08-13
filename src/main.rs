@@ -11,16 +11,8 @@ use dioxus::prelude::*;
 use utils::constants::{ APP_NAME };
 use libs::ui;
 use libs::window_manager::{ WindowAction, WINDOW_MANAGER };
-use libs::input_listener::start_unified_input_listener;
-use libs::focused_input_listener::start_focused_keyboard_listener;
 use libs::input_manager::{ init_window_focus_state_with_value, get_window_focus_state };
 use std::sync::mpsc;
-
-#[cfg(target_os = "linux")]
-use libs::evdev_input_listener::start_evdev_keyboard_listener;
-
-#[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
 
 // Platform-specific icon files for optimal quality
 #[cfg(target_os = "windows")]
@@ -96,6 +88,19 @@ fn main() {
         return;
     }
 
+    // Parsed before anything else so the headless branch can borrow the
+    // parent's console before the first status line is printed.
+    let cli = libs::cli_args::parse(std::env::args_os());
+
+    // Headless runs from a terminal, and this binary is built
+    // `#![windows_subsystem = "windows"]`, so without this every message
+    // below - including "already running" and any soundpack error - would go
+    // to a console that does not exist.
+    #[cfg(target_os = "windows")]
+    if cli.headless {
+        libs::console_attach::attach_to_parent_console();
+    }
+
     // Refuse to start a second copy: two instances means two input listeners
     // and two audio engines, so every keystroke would play twice. Claimed
     // after the worker branch above on purpose - the worker is a child of an
@@ -105,6 +110,17 @@ fn main() {
     let _instance_guard = match libs::single_instance::acquire() {
         Some(guard) => guard,
         None => {
+            if cli.headless {
+                // Two capture pipelines would play every keystroke twice, so
+                // a headless run refuses rather than joining in. It also does
+                // not raise the other copy's window: someone asking for
+                // headless mode from a terminal did not ask for a window.
+                always_eprint!(
+                    "⚠️ {} is already running - close it first, or use the running copy",
+                    APP_NAME
+                );
+                return;
+            }
             // Surface the window of the copy that is already running before
             // giving up. Launching the app a second time is how people ask to
             // see it again, and this process is about to exit invisibly -
@@ -144,9 +160,18 @@ fn main() {
         debug_eprint!("⚠️ Failed to create soundpack directories: {}", e);
     }
 
-    // Check for command line arguments (protocol handling and startup options)
-    let args: Vec<String> = std::env::args().collect();
-    debug_print!("🔍 Command line args: {:?}", args);
+    // Headless: audio engine plus the same input capture the GUI uses, and
+    // nothing else. Branches here rather than earlier so config, logging and
+    // the soundpack directories are already set up, and before the GUI-only
+    // work below (telemetry, ambiance, update state, the window) - none of
+    // which a windowless run has any use for.
+    //
+    // Everything past this point is unreachable in headless mode, which is
+    // what keeps the default launch path unchanged.
+    if cli.headless {
+        libs::headless::run(&cli);
+        return;
+    }
 
     // Check if we should start minimized (from auto-startup).
     //
@@ -156,8 +181,7 @@ fn main() {
     // process goes to that same in-memory state rather than re-parsing.
     let startup_config = state::config_writer::current();
     let should_start_minimized =
-        args.contains(&"--minimized".to_string()) ||
-        (startup_config.auto_start && startup_config.start_minimized);
+        cli.minimized || (startup_config.auto_start && startup_config.start_minimized);
 
     // Register protocol on first run
     // if let Err(e) = protocol::register_protocol() {
@@ -210,83 +234,16 @@ fn main() {
     init_window_focus_state_with_value(initial_focus_state);
     debug_print!("🔍 Initial window focus state: {}", if initial_focus_state { "FOCUSED" } else { "UNFOCUSED" });
 
-    // Detect display server on Linux
-    #[cfg(target_os = "linux")]
-    let display_server = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "x11".to_string());
-
-    #[cfg(target_os = "linux")]
-    debug_print!("🔍 Detected display server: {}", display_server);
-
-    // Start input listeners based on platform and display server
-    #[cfg(target_os = "linux")]
-    {
-        if display_server == "wayland" {
-            // On Wayland, use evdev for keyboard input (works both focused and unfocused)
-            // evdev also handles hotkey detection (Ctrl+Alt+M)
-            debug_print!("🎮 Starting evdev keyboard listener (Wayland mode)...");
-            let focus_state = get_window_focus_state();
-            start_evdev_keyboard_listener(keyboard_tx.clone(), hotkey_tx.clone(), focus_state);
-
-            // Use rdev for mouse events only (no keyboard/hotkeys on Wayland)
-            // Pass "always focused" state to prevent rdev from sending keyboard events
-            debug_print!("🎮 Starting unified input listener for mouse events (Wayland mode)...");
-            let always_focused = Arc::new(Mutex::new(true));
-            start_unified_input_listener(keyboard_tx, mouse_tx, hotkey_tx, Some(always_focused));
-        } else {
-            // On X11, use the hybrid approach (rdev + device_query)
-            // rdev handles keyboard when unfocused, device_query when focused
-            let focus_state = get_window_focus_state();
-
-            debug_print!("🎮 Starting unified input listener (X11 mode - unfocused)...");
-            start_unified_input_listener(keyboard_tx.clone(), mouse_tx, hotkey_tx, Some(focus_state.clone()));
-
-            debug_print!("🎮 Starting focused keyboard listener (X11 mode - focused)...");
-            start_focused_keyboard_listener(keyboard_tx, focus_state);
-        }
-    }
-
-    // Windows: capture runs in a separate worker process using Raw Input, so
-    // events arrive regardless of which window has focus. It cannot run in
-    // this process - tao/wry takes the process-wide Raw Input registration
-    // once the webview is built (see rawinput_listener.rs). If the worker
-    // can't be kept alive we fall back to the rdev + device_query hybrid
-    // below, which works while unfocused only.
-    #[cfg(target_os = "windows")]
-    {
-        let fallback_keyboard_tx = keyboard_tx.clone();
-        let fallback_mouse_tx = mouse_tx.clone();
-        let fallback_hotkey_tx = hotkey_tx.clone();
-
-        debug_print!("🎮 Starting Raw Input worker process...");
-        libs::input_worker_host::start_input_worker_host(
-            keyboard_tx,
-            mouse_tx,
-            hotkey_tx,
-            Box::new(move || {
-                let focus_state = get_window_focus_state();
-                start_unified_input_listener(
-                    fallback_keyboard_tx.clone(),
-                    fallback_mouse_tx,
-                    fallback_hotkey_tx,
-                    Some(focus_state.clone())
-                );
-                start_focused_keyboard_listener(fallback_keyboard_tx, focus_state);
-            })
-        );
-    }
-
-    // macOS: hybrid approach (rdev + device_query) - rdev handles keyboard
-    // when unfocused, device_query when focused.
-    #[cfg(target_os = "macos")]
-    {
-        let focus_state = get_window_focus_state();
-
-        debug_print!("🎮 Starting unified input listener (unfocused)...");
-        start_unified_input_listener(keyboard_tx.clone(), mouse_tx, hotkey_tx, Some(focus_state.clone()));
-
-        debug_print!("🎮 Starting focused keyboard listener (focused)...");
-        start_focused_keyboard_listener(keyboard_tx, focus_state);
-    }
+    // Start platform input capture. Shared with headless mode
+    // (`libs::bootstrap`) so both launch paths get the same listeners - on
+    // Windows that is the Raw Input worker process, with the rdev hybrid only
+    // as its fallback.
+    libs::bootstrap::start_input_capture_with_focus(
+        keyboard_tx,
+        mouse_tx,
+        hotkey_tx,
+        get_window_focus_state()
+    );
 
     // Create window action channel
     let (window_tx, _window_rx) = mpsc::channel::<WindowAction>();
