@@ -1,10 +1,13 @@
 use crate::components::logo::Logo;
 use crate::components::soundpack_selector::{ KeyboardSoundpackSelector, MouseSoundpackSelector };
+use crate::components::ui::Toggler;
 use crate::components::volume_slider::{ KeyboardVolumeSlider, MouseVolumeSlider };
 use crate::libs::AudioContext;
 use crate::utils::config::use_config;
+use crate::libs::tray_service::request_tray_update;
 use dioxus::prelude::*;
 use futures_timer::Delay;
+use lucide_dioxus::ExternalLink;
 use std::sync::atomic::{ AtomicU64, Ordering };
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +20,7 @@ pub fn HomePage(audio_ctx: Arc<AudioContext>) -> Element {
     // Volume states from config
     let mut volume = use_signal(|| config().volume);
     let mut mouse_volume = use_signal(|| config().mouse_volume);
+    let enable_sound = use_memo(move || config().enable_sound);
 
     // Use atomic counters to track save tasks and cancel old ones
     let save_counter = use_signal(|| Arc::new(AtomicU64::new(0)));
@@ -142,6 +146,52 @@ pub fn HomePage(audio_ctx: Arc<AudioContext>) -> Element {
               on_change: move |new_mouse_volume: f32| {
                   mouse_volume.set(new_mouse_volume);
               },
+            }
+          }
+          div { class: "divider m-0" }
+          div { class: "{crate::utils::spacing::SECTION_SPACING}",
+            // Mirrors the Settings toggle of the same name - both write
+            // `enable_sound`, so the shared config signal keeps them in step.
+            Toggler {
+              title: "Enable all sounds".to_string(),
+              description: Some("You can also use Ctrl+Alt+M to toggle sound on/off".to_string()),
+              checked: enable_sound(),
+              on_change: {
+                  let update_config = update_config.clone();
+                  let audio_ctx = audio_ctx.clone();
+                  move |new_value: bool| {
+                      // The engine caches this flag; a config write alone
+                      // would leave it playing until restart. Go through the
+                      // audio context so the engine is notified too.
+                      audio_ctx.set_sound_enabled(new_value);
+                      update_config(
+                          Box::new(move |config| {
+                              config.enable_sound = new_value;
+                          }),
+                      );
+                      request_tray_update();
+                  }
+              },
+            }
+            // Same label-left / control-right shape as Toggler above, which is
+            // a plain `label` rather than a component, so the row is written
+            // out here instead of reaching for one that does not exist.
+            div { class: "label w-full justify-between",
+              div { class: "space-y-0",
+                div { class: "text-sm font-medium text-base-content", "Sound pack editor" }
+                div { class: "text-xs whitespace-break-spaces text-base-content/70",
+                  "Create and edit your own sound packs on the web"
+                }
+              }
+              div {
+                a {
+                  class: "btn btn-soft btn-sm",
+                  href: "https://mechvibes.com/editor?utm_source=mechvibes&utm_medium=app&utm_campaign=home",
+                  target: "_blank",
+                  "Open editor"
+                  ExternalLink { class: "w-4 h-4 ml-1" }
+                }
+              }
             }
           }
         }

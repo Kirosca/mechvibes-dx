@@ -22,7 +22,6 @@ pub fn SettingsPage() -> Element {
     let audio_ctx = use_context::<Arc<AudioContext>>();
 
     // Use computed signals that always reflect current config state
-    let enable_sound = use_memo(move || config().enable_sound);
     let enable_volume_boost = use_memo(move || config().enable_volume_boost);
     let auto_start = use_memo(move || config().auto_start);
     let start_minimized = use_memo(move || config().start_minimized);
@@ -67,28 +66,8 @@ pub fn SettingsPage() -> Element {
             content_class: "collapse-content text-sm",
             children: rsx! {
               div { class: "{crate::utils::spacing::SECTION_SPACING_LG}",
-                // Volume Control
-                Toggler {
-                  title: "Enable all sounds".to_string(),
-                  description: Some("You can also use Ctrl+Alt+M to toggle sound on/off".to_string()),
-                  checked: enable_sound(),
-                  on_change: {
-                      let update_config = update_config.clone();
-                      let audio_ctx = audio_ctx.clone();
-                      move |new_value: bool| {
-                          // The engine caches this flag; a config write alone
-                          // would leave it playing until restart. Go through
-                          // the audio context so the engine is notified too.
-                          audio_ctx.set_sound_enabled(new_value);
-                          update_config(
-                              Box::new(move |config| {
-                                  config.enable_sound = new_value;
-                              }),
-                          );
-                          request_tray_update();
-                      }
-                  },
-                }
+                // "Enable all sounds" lives on the Home page now, next to the
+                // volume sliders it affects.
                 // Volume Boost
                 Toggler {
                   title: "Volume boost (200% max)".to_string(),
