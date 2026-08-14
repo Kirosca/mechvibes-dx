@@ -308,6 +308,61 @@ impl AppConfig {
                     config_updated = true;
                 }
 
+                // Migrate index-based audio device IDs to name-based ones.
+                // `output_{index}` resolved by enumeration position, so
+                // unplugging any device shifted the saved selection onto a
+                // different one. Resolve it by position one last time and
+                // rewrite it as the device's name-based ID.
+                //
+                // This enumerates devices, which costs hundreds of ms, on a
+                // path that runs during `config_writer`'s `get_or_init`. It is
+                // acceptable only because it runs at most once per config: the
+                // rewritten ID no longer matches `is_legacy_index_device_id`.
+                // Do not extend this branch into something that runs on every
+                // load. Note also that nothing reachable from here may call
+                // `config_writer::current()` - that would re-enter the
+                // initialising `OnceLock` and deadlock. `get_output_devices`
+                // does not; `get_current_output_sample_rate` does, so it must
+                // not be used here.
+                if let Some(device_id) = config.selected_audio_device.clone() {
+                    if crate::libs::device_manager::is_legacy_index_device_id(&device_id) {
+                        let manager = crate::libs::device_manager::DeviceManager::new();
+                        let migrated = manager
+                            .get_output_devices()
+                            .ok()
+                            .and_then(|devices| {
+                                let index = device_id
+                                    .strip_prefix("output_")
+                                    .and_then(|rest| rest.parse::<usize>().ok())?;
+                                devices.get(index).cloned()
+                            });
+
+                        match migrated {
+                            Some(device) => {
+                                crate::always_print!(
+                                    "🔄 Migrating audio device ID: {} -> {} ({})",
+                                    device_id,
+                                    device.id,
+                                    device.name
+                                );
+                                config.selected_audio_device = Some(device.id);
+                            }
+                            None => {
+                                // Falling back to the system default rather
+                                // than keeping an ID that now points at some
+                                // other device: silently playing out of the
+                                // wrong device is worse than reverting.
+                                crate::always_print!(
+                                    "⚠️  Saved audio device {} no longer resolves, falling back to system default",
+                                    device_id
+                                );
+                                config.selected_audio_device = None;
+                            }
+                        }
+                        config_updated = true;
+                    }
+                }
+
                 // Sync auto_start with actual registry state
                 let actual_auto_start = crate::utils::auto_startup::get_auto_startup_state();
                 if config.auto_start != actual_auto_start {
