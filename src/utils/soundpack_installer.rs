@@ -198,6 +198,13 @@ pub fn extract_and_install_soundpack_with_type(
         ::write(&config_path, updated_config)
         .map_err(|e| format!("Failed to write updated config.json: {}", e))?;
 
+    // Stamp the arrival so the lists can sort by it and badge it as new. The
+    // key is `{type}/{id}`, the same folder_path the scanner records.
+    let folder_path = format!("{}/{}", soundpack_type, soundpack_id);
+    crate::state::config_writer::apply(|config| {
+        crate::state::soundpack_library::mark_added(&mut config.soundpack_added_at, &folder_path);
+    });
+
     Ok(SoundpackInfo {
         name: soundpack_name,
         id: soundpack_id,

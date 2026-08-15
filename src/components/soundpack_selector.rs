@@ -46,6 +46,14 @@ fn activate_soundpack(
     let pack_id_config = pack_id.clone();
     update_config(
         Box::new(move |config| {
+            // Selecting a pack is what clears its New badge. Doing it here,
+            // the one path both the dropdown and the randomize button go
+            // through, is what makes the badge disappear everywhere at once.
+            crate::state::soundpack_library::mark_seen(
+                &mut config.soundpacks_seen,
+                &pack_id_config
+            );
+
             match soundpack_type {
                 SelectorType::Keyboard => {
                     config.keyboard_soundpack = pack_id_config;
@@ -102,7 +110,12 @@ fn SoundpackDropdown(soundpack_type: SelectorType, icon: Element, label: String)
             SelectorType::Keyboard => config.keyboard_soundpack.clone(),
             SelectorType::Mouse => config.mouse_soundpack.clone(),
         }
-    }); // Filter soundpacks based on search query and type, then sort by last_modified
+    });
+
+    // Reading this from the shared config signal is what makes the badge
+    // vanish from every list at once: selecting a pack anywhere writes
+    // `soundpacks_seen`, and each list re-renders off the same value.
+    let seen_soundpacks = use_memo(move || config().soundpacks_seen.clone()); // Filter soundpacks based on search query and type, then sort by last_modified
     let filtered_soundpacks = use_memo(move || {
         let query = search_query().to_lowercase();
         let all_packs = soundpacks(); // Filter by type first
@@ -130,8 +143,17 @@ fn SoundpackDropdown(soundpack_type: SelectorType, icon: Element, label: String)
                         pack.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
                 })
                 .collect()
-        }; // Sort by last_modified in descending order (most recent first)
-        filtered_packs.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        };
+
+        // Most recently added first. `soundpack_added_at` rather than
+        // `last_modified`, which is the folder's mtime and moves whenever a
+        // file inside the pack is edited. Packs with no timestamp sort last.
+        let added_at = config().soundpack_added_at;
+        filtered_packs.sort_by(|a, b| {
+            let a_added = added_at.get(&a.folder_path).copied().unwrap_or(0);
+            let b_added = added_at.get(&b.folder_path).copied().unwrap_or(0);
+            b_added.cmp(&a_added).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
 
         filtered_packs
     });
@@ -366,8 +388,16 @@ fn SoundpackDropdown(soundpack_type: SelectorType, icon: Element, label: String)
                           }
                         }
                         div { class: "flex-1 min-w-0",
-                          div { class: "text-xs font-medium line-clamp-1 text-base-content",
-                            "{pack.name}"
+                          div { class: "flex items-center gap-2",
+                            div { class: "text-xs font-medium line-clamp-1 text-base-content",
+                              "{pack.name}"
+                            }
+                            if crate::state::soundpack_library::is_new(
+                                &seen_soundpacks(),
+                                &pack.folder_path,
+                            ) {
+                              span { class: "badge badge-primary badge-xs shrink-0 ml-0.5", "New" }
+                            }
                           }
                           div { class: "text-xs font-normal line-clamp-1 text-base-content/50",
                             if let Some(author) = &pack.author {

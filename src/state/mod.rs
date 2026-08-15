@@ -6,4 +6,5 @@ pub mod keyboard;
 pub mod manifest;
 pub mod paths;
 pub mod soundpack;
+pub mod soundpack_library;
 pub mod themes;

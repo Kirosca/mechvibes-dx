@@ -1,10 +1,12 @@
 use crate::state::paths;
 use crate::state::soundpack::SoundpackMetadata;
+use crate::state::soundpack_library::SoundpackSort;
 use crate::state::{ app::use_state_trigger };
+use crate::utils::config::use_config;
 use crate::utils::path::{ open_path, directory_exists };
 use dioxus::document::eval;
 use dioxus::prelude::*;
-use lucide_dioxus::{ FolderOpen, Music, Plus, RefreshCw, Trash };
+use lucide_dioxus::{ ArrowDownAZ, Clock, FolderOpen, Music, Plus, RefreshCw, Trash };
 use std::sync::Arc;
 
 use super::ConfirmDeleteModal;
@@ -59,15 +61,17 @@ pub fn SoundpackTable(
 ) -> Element {
     // Search state
     let mut search_query = use_signal(String::new);
+    let mut sort_order = use_signal(|| SoundpackSort::RecentlyAdded);
 
     // Refresh state
     let refreshing_soundpacks = use_signal(|| false);
     let state_trigger = use_state_trigger();
     let audio_ctx: Arc<crate::libs::audio::AudioContext> = use_context();
+    let (config, _update_config) = use_config();
 
     // Filter soundpacks based on search query - computed every render to be reactive to props changes
     let query = search_query().to_lowercase();
-    let filtered_soundpacks: Vec<SoundpackMetadata> = if query.is_empty() {
+    let mut filtered_soundpacks: Vec<SoundpackMetadata> = if query.is_empty() {
         soundpacks.clone()
     } else {
         soundpacks
@@ -83,6 +87,29 @@ pub fn SoundpackTable(
             .cloned()
             .collect()
     };
+
+    let seen_soundpacks = config().soundpacks_seen.clone();
+    match sort_order() {
+        SoundpackSort::Name => {
+            filtered_soundpacks.sort_by(|a, b|
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            );
+        }
+        SoundpackSort::RecentlyAdded => {
+            // `soundpack_added_at` rather than `last_modified`, which is the
+            // folder's mtime and moves whenever a file inside the pack is
+            // edited. Packs with no timestamp sort last, then by name so the
+            // order is stable rather than arbitrary.
+            let added_at = config().soundpack_added_at;
+            filtered_soundpacks.sort_by(|a, b| {
+                let a_added = added_at.get(&a.folder_path).copied().unwrap_or(0);
+                let b_added = added_at.get(&b.folder_path).copied().unwrap_or(0);
+                b_added
+                    .cmp(&a_added)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+        }
+    }
 
     // Refresh handler
     let refresh_soundpacks_cache = {
@@ -128,6 +155,27 @@ pub fn SoundpackTable(
           }
           button {
             class: "btn btn-sm btn-ghost",
+            onclick: move |_| {
+                sort_order
+                    .set(match sort_order() {
+                        SoundpackSort::RecentlyAdded => SoundpackSort::Name,
+                        SoundpackSort::Name => SoundpackSort::RecentlyAdded,
+                    });
+            },
+            title: "Sorted by {sort_order().label().to_lowercase()} - click to change",
+            // The icon carries the current order on its own: a clock for
+            // recency, A-Z for alphabetical.
+            match sort_order() {
+                SoundpackSort::RecentlyAdded => rsx! {
+                  Clock { class: "w-4 h-4" }
+                },
+                SoundpackSort::Name => rsx! {
+                  ArrowDownAZ { class: "w-4 h-4" }
+                },
+            }
+          }
+          button {
+            class: "btn btn-sm btn-ghost",
             disabled: refreshing_soundpacks(),
             onclick: refresh_soundpacks_cache,
             title: "Refresh sound pack list",
@@ -161,7 +209,13 @@ pub fn SoundpackTable(
               table { class: "table table-sm w-full",
                 tbody {
                   for pack in filtered_soundpacks {
-                    SoundpackTableRow { soundpack: pack }
+                    SoundpackTableRow {
+                      is_new: crate::state::soundpack_library::is_new(
+                          &seen_soundpacks,
+                          &pack.folder_path,
+                      ),
+                      soundpack: pack,
+                    }
                   }
                 }
               }
@@ -173,7 +227,7 @@ pub fn SoundpackTable(
 }
 
 #[component]
-pub fn SoundpackTableRow(soundpack: SoundpackMetadata) -> Element {
+pub fn SoundpackTableRow(soundpack: SoundpackMetadata, is_new: bool) -> Element {
     let state_trigger = use_state_trigger();
 
     // Handlers for button clicks
@@ -258,8 +312,13 @@ pub fn SoundpackTableRow(soundpack: SoundpackMetadata) -> Element {
           }
           // Name
           div {
-            div { class: "font-medium text-sm text-base-content line-clamp-1",
-              "{soundpack.name}"
+            div { class: "flex items-center gap-2",
+              div { class: "font-medium text-sm text-base-content line-clamp-1",
+                "{soundpack.name}"
+              }
+              if is_new {
+                span { class: "badge badge-primary badge-xs shrink-0 ml-0.5", "New" }
+              }
             }
             if let Some(author) = &soundpack.author {
               div { class: "text-xs text-base-content/50", "by {author}" }
