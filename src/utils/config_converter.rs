@@ -73,10 +73,19 @@ fn get_duration_with_symphonia(file_path: &str) -> Result<f64, Box<dyn std::erro
 
 /// Convert soundpack config from version 1 to version 2
 /// Uses comprehensive IOHook keycode mapping (supports all platforms)
+/// Converts a V1 soundpack config to V2 in place.
+///
+/// `is_mouse_pack` selects which table the V1 iohook codes are read through.
+/// It cannot be inferred from the config: V1 mouse packs were authored in the
+/// keyboard editor and are byte-for-byte keyboard configs, so only the folder
+/// they live in says what they are. Getting this wrong produces a pack that
+/// converts and loads without complaint and then never plays - see
+/// `create_iohook_to_mouse_button_mapping`.
 pub fn convert_v1_to_v2(
     v1_config_path: &str,
     output_path: &str,
-    soundpack_dir: Option<&str>
+    soundpack_dir: Option<&str>,
+    is_mouse_pack: bool
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Determine soundpack directory - use provided or infer from config path
     let soundpack_dir = if let Some(dir) = soundpack_dir {
@@ -249,15 +258,28 @@ pub fn convert_v1_to_v2(
     converted_config.insert("options".to_string(), Value::Object(options)); // Convert "defines" to "definitions" with new format
     let mut definitions = Map::new();
     if let Some(defines) = config.get("defines").and_then(|d| d.as_object()) {
-        let key_mappings = create_iohook_to_web_key_mapping();
+        let key_mappings = if is_mouse_pack {
+            create_iohook_to_mouse_button_mapping()
+        } else {
+            create_iohook_to_web_key_mapping()
+        };
         crate::always_print!("🔧 Converting {} key definitions to new format (single method)", defines.len());
         if v1_define_type == "multi" {
             // V1 multi method: defines contains IOHook code -> audio filename mappings
             // We need to create timing based on concatenated audio file offsets
             crate::always_print!("🔧 Processing V1 multi method defines");
 
-            for (iohook_code, value) in defines {
-                if let Ok(iohook_num) = iohook_code.parse::<u32>() {
+            // Presses before releases, so a button's segments end up in that
+            // order regardless of how the JSON object was written. Within each
+            // group the code orders them, keeping the output stable.
+            let mut ordered: Vec<(&String, &Value)> = defines.iter().collect();
+            ordered.sort_by_key(|(code, _)| {
+                let (num, is_press) = iohook_code_and_press(code).unwrap_or((u32::MAX, true));
+                (!is_press, num)
+            });
+
+            for (iohook_code, value) in ordered {
+                if let Some((iohook_num, _)) = iohook_code_and_press(iohook_code) {
                     if let Some(key_name) = key_mappings.get(&iohook_num) {
                         if let Some(audio_filename) = value.as_str() {
                             if !audio_filename.is_empty() && audio_filename != "null" {
@@ -311,9 +333,30 @@ pub fn convert_v1_to_v2(
                                             ]
                                         )
                                     ];
-                                    key_def.insert("timing".to_string(), Value::Array(timing));
+                                    key_def.insert("timing".to_string(), Value::Array(timing.clone()));
 
-                                    definitions.insert(key_name.clone(), Value::Object(key_def));
+                                    // Append rather than replace. A V1 mouse pack defines each
+                                    // button twice - "1" for the press and "01" for the release -
+                                    // and both land on the same button here, so inserting would
+                                    // drop one of the two sounds. V2 timing is a list of segments
+                                    // precisely so a button can carry both.
+                                    match definitions.get_mut(key_name.as_str()) {
+                                        Some(Value::Object(existing)) => {
+                                            if
+                                                let Some(Value::Array(segments)) = existing.get_mut(
+                                                    "timing"
+                                                )
+                                            {
+                                                segments.extend(timing);
+                                            }
+                                        }
+                                        _ => {
+                                            definitions.insert(
+                                                key_name.clone(),
+                                                Value::Object(key_def)
+                                            );
+                                        }
+                                    }
                                     crate::always_print!(
                                         "   ✅ Key '{}' -> {} [offset: {}ms, end: {}ms]",
                                         key_name,
@@ -338,7 +381,7 @@ pub fn convert_v1_to_v2(
             crate::always_print!("🔧 Processing V1 single method defines");
 
             for (iohook_code, value) in defines {
-                if let Ok(iohook_num) = iohook_code.parse::<u32>() {
+                if let Some((iohook_num, _)) = iohook_code_and_press(iohook_code) {
                     if let Some(key_name) = key_mappings.get(&iohook_num) {
                         let mut key_def = Map::new();
 
@@ -909,6 +952,44 @@ fn save_audio_file(
 
 /// Create comprehensive IOHook to Web API key mapping
 /// Supports all platforms (Windows, Linux, macOS)
+/// Mouse-pack equivalent of [`create_iohook_to_web_key_mapping`].
+///
+/// Mechvibes V1 had no mouse packs of its own, so the ones the community
+/// built were authored in the keyboard editor: the left button was recorded
+/// against iohook code 1, the right against 2, the middle/scroll against 3.
+/// Run through the keyboard table those become `Escape`, `Digit1` and
+/// `Digit2`, which no mouse event ever produces - the runtime emits
+/// `MouseLeft`/`MouseRight`/`MouseMiddle` - so the converted pack loaded
+/// cleanly and then sat silent.
+///
+/// The file names inside those packs are what pin the meaning down: code 1
+/// carries `left-up.mp3`/`left-down.mp3`, code 2 `right-*`, code 3
+/// `scroll-*`.
+/// Splits a V1 `defines` key into its iohook code and whether it is the press
+/// or the release.
+///
+/// V1 mouse packs encode the release as the same code with a leading zero:
+/// Model O by Yes ships `"1"`/`"2"` for the left and right press and
+/// `"01"`/`"02"` for their releases. `"01".parse::<u32>()` is 1, so parsing
+/// the key directly makes the release indistinguishable from the press, and
+/// one of the two overwrites the other in the definitions map.
+///
+/// A leading zero only means this for a multi-character key, so `"0"` itself
+/// and ordinary codes like `"10"` are read normally.
+fn iohook_code_and_press(define_key: &str) -> Option<(u32, bool)> {
+    let is_press = !(define_key.len() > 1 && define_key.starts_with('0'));
+    let code = define_key.parse::<u32>().ok()?;
+    Some((code, is_press))
+}
+
+fn create_iohook_to_mouse_button_mapping() -> HashMap<u32, String> {
+    let mut mapping = HashMap::new();
+    mapping.insert(1, "MouseLeft".to_string());
+    mapping.insert(2, "MouseRight".to_string());
+    mapping.insert(3, "MouseMiddle".to_string());
+    mapping
+}
+
 fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
     let mut mapping = HashMap::new();
 
@@ -1134,7 +1215,103 @@ fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ back_up_existing_file, concatenate_audio_files_with_timing, convert_audio_format };
+    use super::{
+        back_up_existing_file,
+        concatenate_audio_files_with_timing,
+        convert_audio_format,
+        create_iohook_to_mouse_button_mapping,
+        create_iohook_to_web_key_mapping,
+    };
+
+    /// A real V1 mouse pack (Model O by Yes) keys its four sounds as "1",
+    /// "2", "01" and "02": the unpadded codes are presses, the zero-padded
+    /// ones the matching releases. `"01".parse::<u32>()` is 1, so a naive
+    /// parse collapses the release onto the press and one of the two sounds
+    /// is silently lost.
+    #[test]
+    fn a_zero_padded_v1_code_is_a_release_not_a_duplicate_press() {
+        assert_eq!(super::iohook_code_and_press("1"), Some((1, true)));
+        assert_eq!(super::iohook_code_and_press("2"), Some((2, true)));
+        assert_eq!(super::iohook_code_and_press("01"), Some((1, false)));
+        assert_eq!(super::iohook_code_and_press("02"), Some((2, false)));
+
+        // Ordinary keyboard codes are unaffected: "10" is key 10 pressed, not
+        // a padded "0".
+        assert_eq!(super::iohook_code_and_press("10"), Some((10, true)));
+        assert_eq!(super::iohook_code_and_press("not a number"), None);
+    }
+
+    /// End to end on the layout every real V1 mouse pack uses. All seven mouse
+    /// packs shipped by MechVibes++ key their sounds this way, as does the
+    /// community pack (Model O by Yes) this was reproduced against: "1"/"2"/"3"
+    /// press, "01"/"02"/"03" release.
+    #[test]
+    fn a_real_v1_mouse_pack_converts_to_buttons_keeping_press_and_release() {
+        let dir = temp_dir("v1-mouse-pack");
+        let config_path = dir.join("config.json");
+
+        for name in ["1.wav", "2.wav", "R2.wav", "R3.wav"] {
+            write_tone_wav(&dir.join(name), 44100, 2, 100);
+        }
+
+        std::fs
+            ::write(
+                &config_path,
+                r#"{
+  "id": "custom-sound-pack-77777732",
+  "name": "Model O by Yes",
+  "key_define_type": "multi",
+  "includes_numpad": false,
+  "sound": "sound.wav",
+  "defines": { "1": "1.wav", "2": "2.wav", "01": "R2.wav", "02": "R3.wav" }
+}"#
+            )
+            .expect("write v1 config");
+
+        super::convert_v1_to_v2(
+            config_path.to_str().unwrap(),
+            config_path.to_str().unwrap(),
+            Some(dir.to_str().unwrap()),
+            true
+        ).expect("conversion must succeed");
+
+        let converted: serde_json::Value = serde_json
+            ::from_str(&std::fs::read_to_string(&config_path).expect("read converted"))
+            .expect("converted config must be valid JSON");
+        let definitions = converted["definitions"].as_object().expect("definitions");
+
+        // Buttons the runtime actually emits, not keyboard keys.
+        let names: Vec<&String> = definitions.keys().collect();
+        assert!(definitions.contains_key("MouseLeft"), "got {:?}", names);
+        assert!(definitions.contains_key("MouseRight"), "got {:?}", names);
+        assert!(!definitions.contains_key("Escape"), "keyboard names must be gone");
+        assert!(!definitions.contains_key("Digit1"), "keyboard names must be gone");
+
+        // Press and release both survive: "1" and "01" are the same button, so
+        // inserting rather than appending would silently drop one of them.
+        for button in ["MouseLeft", "MouseRight"] {
+            let timing = definitions[button]["timing"].as_array().expect("timing array");
+            assert_eq!(timing.len(), 2, "{} must carry press and release: {:?}", button, timing);
+        }
+    }
+
+    #[test]
+    fn a_v1_mouse_pack_converts_onto_buttons_not_keyboard_keys() {
+        // V1 mouse packs were authored in the keyboard editor, so their
+        // buttons are iohook codes 1/2/3. Read through the keyboard table
+        // those become Escape/Digit1/Digit2, which no mouse event produces:
+        // the pack then loads cleanly and stays silent (issue #38).
+        let mouse = create_iohook_to_mouse_button_mapping();
+        assert_eq!(mouse.get(&1).map(String::as_str), Some("MouseLeft"));
+        assert_eq!(mouse.get(&2).map(String::as_str), Some("MouseRight"));
+        assert_eq!(mouse.get(&3).map(String::as_str), Some("MouseMiddle"));
+
+        // The keyboard table is what produced the wrong names, and it still
+        // has to keep producing them for actual keyboard packs.
+        let keyboard = create_iohook_to_web_key_mapping();
+        assert_eq!(keyboard.get(&1).map(String::as_str), Some("Escape"));
+        assert_eq!(keyboard.get(&2).map(String::as_str), Some("Digit1"));
+    }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env

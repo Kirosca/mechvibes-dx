@@ -49,8 +49,14 @@ pub fn load_soundpack_metadata(soundpack_id: &str) -> Result<SoundpackMetadata, 
             );
         }
 
+        // The folder is the only thing that says whether this is a mouse pack:
+        // V1 mouse packs were made in the keyboard editor and their configs
+        // are indistinguishable from keyboard ones.
+        let is_mouse_pack =
+            soundpack_id.starts_with("mouse/") || soundpack_id.starts_with("mouse\\");
+
         // Convert V1 to V2
-        match config_converter::convert_v1_to_v2(&config_path, &config_path, None) {
+        match config_converter::convert_v1_to_v2(&config_path, &config_path, None, is_mouse_pack) {
             Ok(()) => {
                 // Successfully converted
             }
