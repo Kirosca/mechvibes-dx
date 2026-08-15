@@ -101,6 +101,21 @@ pub struct AppConfig {
     pub enable_sound: bool,
     pub enable_keyboard_sound: bool, // Enable/disable keyboard sounds specifically
     pub enable_mouse_sound: bool, // Enable/disable mouse sounds specifically
+    // Soundpack library state
+    //
+    // Both live here rather than in `SoundpackMetadata` because
+    // `SoundpackCache::refresh_from_directory` clears the map and rebuilds it
+    // from disk, which would wipe anything stored alongside the scanned
+    // metadata. Keyed by folder_path, the same id the cache and config use.
+    /// When a soundpack was first seen, as a Unix timestamp. Written on import
+    /// and on the first scan that observes a pack, so it is a real "added"
+    /// time rather than the folder's mtime, which changes whenever a file
+    /// inside the pack is edited.
+    #[serde(default)]
+    pub soundpack_added_at: HashMap<String, u64>,
+    /// Soundpacks whose "New" badge has been cleared by selecting them.
+    #[serde(default)]
+    pub soundpacks_seen: Vec<String>,
     // Device settings
     pub selected_audio_device: Option<String>, // Selected audio output device
     pub enabled_keyboards: Vec<String>, // Enabled physical keyboards (by device instance ID)
@@ -253,6 +268,8 @@ impl AppConfig {
             && self.enable_keyboard_sound == other.enable_keyboard_sound
             && self.enable_mouse_sound == other.enable_mouse_sound
             && self.selected_audio_device == other.selected_audio_device
+            && self.soundpack_added_at == other.soundpack_added_at
+            && self.soundpacks_seen == other.soundpacks_seen
             && self.enabled_keyboards == other.enabled_keyboards
             && self.enabled_mice == other.enabled_mice
             && self.theme == other.theme
@@ -308,57 +325,30 @@ impl AppConfig {
                     config_updated = true;
                 }
 
-                // Migrate index-based audio device IDs to name-based ones.
-                // `output_{index}` resolved by enumeration position, so
-                // unplugging any device shifted the saved selection onto a
-                // different one. Resolve it by position one last time and
-                // rewrite it as the device's name-based ID.
+                // Drop index-based audio device IDs, reverting to the system
+                // default.
                 //
-                // This enumerates devices, which costs hundreds of ms, on a
-                // path that runs during `config_writer`'s `get_or_init`. It is
-                // acceptable only because it runs at most once per config: the
-                // rewritten ID no longer matches `is_legacy_index_device_id`.
-                // Do not extend this branch into something that runs on every
-                // load. Note also that nothing reachable from here may call
-                // `config_writer::current()` - that would re-enter the
-                // initialising `OnceLock` and deadlock. `get_output_devices`
-                // does not; `get_current_output_sample_rate` does, so it must
-                // not be used here.
+                // `output_{index}` resolved by enumeration position, which is
+                // not an identity: unplugging any device shifts everything
+                // after it down a slot, so the saved index may already point at
+                // a different device than the one the user picked. Resolving it
+                // one last time would only launder that guess into a
+                // permanent-looking name-based ID, so a selection that can no
+                // longer be trusted is discarded instead. The user picks again,
+                // and from then on the name-based ID stays put.
+                //
+                // Deliberately does not enumerate devices: that costs hundreds
+                // of ms on a path that runs during `config_writer`'s
+                // `get_or_init`. Nothing reachable from here may call
+                // `config_writer::current()` either - that would re-enter the
+                // initialising `OnceLock` and deadlock.
                 if let Some(device_id) = config.selected_audio_device.clone() {
                     if crate::libs::device_manager::is_legacy_index_device_id(&device_id) {
-                        let manager = crate::libs::device_manager::DeviceManager::new();
-                        let migrated = manager
-                            .get_output_devices()
-                            .ok()
-                            .and_then(|devices| {
-                                let index = device_id
-                                    .strip_prefix("output_")
-                                    .and_then(|rest| rest.parse::<usize>().ok())?;
-                                devices.get(index).cloned()
-                            });
-
-                        match migrated {
-                            Some(device) => {
-                                crate::always_print!(
-                                    "🔄 Migrating audio device ID: {} -> {} ({})",
-                                    device_id,
-                                    device.id,
-                                    device.name
-                                );
-                                config.selected_audio_device = Some(device.id);
-                            }
-                            None => {
-                                // Falling back to the system default rather
-                                // than keeping an ID that now points at some
-                                // other device: silently playing out of the
-                                // wrong device is worse than reverting.
-                                crate::always_print!(
-                                    "⚠️  Saved audio device {} no longer resolves, falling back to system default",
-                                    device_id
-                                );
-                                config.selected_audio_device = None;
-                            }
-                        }
+                        crate::always_print!(
+                            "🔄 Dropping index-based audio device {}: reverting to system default",
+                            device_id
+                        );
+                        config.selected_audio_device = None;
                         config_updated = true;
                     }
                 }
@@ -456,6 +446,8 @@ impl Default for AppConfig {
             enable_sound: true,
             enable_keyboard_sound: true, // Default keyboard sounds enabled
             enable_mouse_sound: true, // Default mouse sounds enabled
+            soundpack_added_at: HashMap::new(),
+            soundpacks_seen: Vec::new(),
             selected_audio_device: None, // Default to system default audio device
             enabled_keyboards: Vec::new(), // Default to no keyboards enabled (all keyboards will work)
             enabled_mice: Vec::new(), // Default to no mice enabled (all mice will work)
@@ -773,5 +765,46 @@ mod tests {
 
         same.volume = config.volume + 0.25;
         assert!(!same.data_equals(&config), "a real change must still be detected");
+    }
+
+    /// `config_writer::apply` reverts a mutation that `data_equals` reports as
+    /// unchanged, so a field missing from that comparison can never be
+    /// persisted: it is written, judged equal, and rolled back. The soundpack
+    /// library fields were added without it, which left both the New badge and
+    /// sort-by-added-time reading an empty map forever.
+    #[test]
+    fn the_soundpack_library_fields_count_as_real_changes() {
+        let base = AppConfig::default();
+
+        let mut stamped = base.clone();
+        stamped.soundpack_added_at.insert("keyboard/one".to_string(), 1_700_000_000);
+        assert!(
+            !base.data_equals(&stamped),
+            "an added-at stamp must count as a change, or apply() rolls it back"
+        );
+
+        let mut seen = base.clone();
+        seen.soundpacks_seen.push("keyboard/one".to_string());
+        assert!(
+            !base.data_equals(&seen),
+            "clearing a New badge must count as a change, or apply() rolls it back"
+        );
+    }
+
+    /// A device saved as `output_{index}` cannot be trusted: the index is a
+    /// position in the enumeration, so unplugging anything ahead of it makes
+    /// it point somewhere else. Config load drops it rather than resolving it,
+    /// which would only launder the guess into a permanent-looking id.
+    #[test]
+    fn an_index_based_device_id_is_recognised_as_legacy_and_droppable() {
+        use crate::libs::device_manager::is_legacy_index_device_id;
+
+        assert!(is_legacy_index_device_id("output_2"));
+        assert!(is_legacy_index_device_id("output_0"));
+
+        // Name-based ids and the default sentinel survive: they are stable, so
+        // there is nothing to drop.
+        assert!(!is_legacy_index_device_id("output_name:0b3a976597860826"));
+        assert!(!is_legacy_index_device_id("output_default"));
     }
 }
