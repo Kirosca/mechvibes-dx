@@ -1,13 +1,12 @@
 use crate::components::logo::Logo;
 use crate::components::soundpack_selector::{ KeyboardSoundpackSelector, MouseSoundpackSelector };
-use crate::components::ui::Toggler;
 use crate::components::volume_slider::{ KeyboardVolumeSlider, MouseVolumeSlider };
 use crate::libs::AudioContext;
 use crate::utils::config::use_config;
 use crate::libs::tray_service::request_tray_update;
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use lucide_dioxus::ExternalLink;
+use lucide_dioxus::{ ExternalLink, Pencil, Volume2 };
 use std::sync::atomic::{ AtomicU64, Ordering };
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,12 +39,18 @@ pub fn HomePage(audio_ctx: Arc<AudioContext>) -> Element {
 
     // Debounce effect for saving keyboard volume config changes.
     //
-    // The debounce only defers the *disk* write. `spawn` registers the task in
-    // this scope's `spawned_tasks`, and navigating to another tab unmounts
-    // HomePage, so `Runtime::remove_scope` cancels the task mid-`Delay` and the
-    // deferred write never happens. Publishing to the shared config signal
-    // therefore has to be synchronous - otherwise the signal keeps the
-    // pre-drag volume and re-seeds the slider with it when Home remounts.
+    // Only the trailing call writes. `update_config` goes straight through to
+    // `config_writer::apply`, which serialises the whole config and does a
+    // write-plus-rename on every call, so publishing on each slider step put
+    // dozens of synchronous disk writes on the UI thread during one drag and
+    // made every click feel stuck.
+    //
+    // `spawn` registers the task in this scope's `spawned_tasks`, so
+    // navigating away unmounts HomePage and `Runtime::remove_scope` cancels it
+    // mid-`Delay`. The volume the engine is already playing at is not lost by
+    // that: `use_effect` above pushes it to the audio context synchronously,
+    // and the slider re-seeds from this signal, which keeps the dragged value
+    // for the life of the session either way.
     {
         let update_config = update_config.clone();
         use_effect(move || {
@@ -57,17 +62,12 @@ pub fn HomePage(audio_ctx: Arc<AudioContext>) -> Element {
             let update_config = update_config.clone();
             let save_counter_clone = save_counter();
 
-            // Publish immediately so the value survives an unmount; the write
-            // itself is deduplicated by `update_config` when nothing changed.
-            update_config(
-                Box::new(move |config| {
-                    config.volume = current_volume;
-                })
-            );
-
             spawn(async move {
-                // Wait for 500ms
-                Delay::new(Duration::from_millis(500)).await;
+                // Short enough that letting go of the slider and immediately
+                // switching tabs still lands the write, long enough that a
+                // drag - whose input events arrive milliseconds apart -
+                // collapses into one.
+                Delay::new(Duration::from_millis(150)).await;
 
                 // Check if this task is still the latest one
                 if save_counter_clone.load(Ordering::SeqCst) == current_task_id {
@@ -96,15 +96,12 @@ pub fn HomePage(audio_ctx: Arc<AudioContext>) -> Element {
             let update_config = update_config.clone();
             let mouse_save_counter_clone = mouse_save_counter();
 
-            update_config(
-                Box::new(move |config| {
-                    config.mouse_volume = current_mouse_volume;
-                })
-            );
-
             spawn(async move {
-                // Wait for 500ms
-                Delay::new(Duration::from_millis(500)).await;
+                // Short enough that letting go of the slider and immediately
+                // switching tabs still lands the write, long enough that a
+                // drag - whose input events arrive milliseconds apart -
+                // collapses into one.
+                Delay::new(Duration::from_millis(150)).await;
 
                 // Check if this task is still the latest one
                 if mouse_save_counter_clone.load(Ordering::SeqCst) == current_task_id {
@@ -150,47 +147,57 @@ pub fn HomePage(audio_ctx: Arc<AudioContext>) -> Element {
           }
           div { class: "divider m-0" }
           div { class: "{crate::utils::spacing::SECTION_SPACING}",
-            // Mirrors the Settings toggle of the same name - both write
-            // `enable_sound`, so the shared config signal keeps them in step.
-            Toggler {
-              title: "Enable all sounds".to_string(),
-              description: Some("You can also use Ctrl+Alt+M to toggle sound on/off".to_string()),
-              checked: enable_sound(),
-              on_change: {
-                  let update_config = update_config.clone();
-                  let audio_ctx = audio_ctx.clone();
-                  move |new_value: bool| {
-                      // The engine caches this flag; a config write alone
-                      // would leave it playing until restart. Go through the
-                      // audio context so the engine is notified too.
-                      audio_ctx.set_sound_enabled(new_value);
-                      update_config(
-                          Box::new(move |config| {
-                              config.enable_sound = new_value;
-                          }),
-                      );
-                      request_tray_update();
-                  }
-              },
-            }
-            // Same label-left / control-right shape as Toggler above, which is
-            // a plain `label` rather than a component, so the row is written
-            // out here instead of reaching for one that does not exist.
-            div { class: "label w-full justify-between",
-              div { class: "space-y-0",
-                div { class: "text-sm font-medium text-base-content", "Sound pack editor" }
-                div { class: "text-xs whitespace-break-spaces text-base-content/70",
-                  "Create and edit your own sound packs on the web"
+            // Same header shape as the Keyboard/Mouse sections above: icon in
+            // primary, label beside it, control on the right. Written out
+            // rather than using Toggler, which stacks its description under
+            // the title and so cannot put the hotkey next to it.
+            label { class: "flex items-center justify-between w-full cursor-pointer",
+              div { class: "flex items-center gap-2 text-sm font-bold text-base-content/80",
+                span { class: "text-primary",
+                  Volume2 { class: "w-4 h-4" }
                 }
+                "Enable all sounds"
+                span { class: "text-xs font-normal text-base-content/50", "Ctrl+Alt+M" }
               }
-              div {
-                a {
-                  class: "btn btn-soft btn-sm",
-                  href: "https://mechvibes.com/editor?utm_source=mechvibes&utm_medium=app&utm_campaign=home",
-                  target: "_blank",
-                  "Open editor"
-                  ExternalLink { class: "w-4 h-4 ml-1" }
+              input {
+                r#type: "checkbox",
+                class: "toggle toggle-sm toggle-primary",
+                checked: enable_sound(),
+                onchange: {
+                    let update_config = update_config.clone();
+                    let audio_ctx = audio_ctx.clone();
+                    move |evt: Event<FormData>| {
+                        let new_value = evt.checked();
+                        // The engine caches this flag; a config write alone
+                        // would leave it playing until restart. Go through the
+                        // audio context so the engine is notified too.
+                        audio_ctx.set_sound_enabled(new_value);
+                        update_config(
+                            Box::new(move |config| {
+                                config.enable_sound = new_value;
+                            }),
+                        );
+                        request_tray_update();
+                    }
+                },
+              }
+            }
+          }
+          div { class: "divider m-0" }
+          div { class: "{crate::utils::spacing::SECTION_SPACING}",
+            div { class: "flex items-center justify-between w-full",
+              div { class: "flex items-center gap-2 text-sm font-bold text-base-content/80",
+                span { class: "text-primary",
+                  Pencil { class: "w-4 h-4" }
                 }
+                "Sound pack editor"
+              }
+              a {
+                class: "btn btn-soft btn-xs rounded-box",
+                href: "https://beta.mechvibes.com/editor?utm_source=mechvibes&utm_medium=app&utm_campaign=home",
+                target: "_blank",
+                "Open"
+                ExternalLink { class: "w-3 h-3 ml-1" }
               }
             }
           }
