@@ -209,6 +209,82 @@ pub fn mask_key_identities(line: &str) -> String {
     out
 }
 
+/// The account name to hide from exports, or `None` when it cannot be
+/// determined or is too short to replace safely.
+///
+/// Very short names are skipped deliberately: a one- or two-character username
+/// would match inside ordinary words and shred the log into `[username]`
+/// fragments, which costs more diagnostically than the name is worth hiding.
+fn current_user_name() -> Option<String> {
+    for var in ["USERNAME", "USER", "LOGNAME"] {
+        if let Ok(value) = std::env::var(var) {
+            let trimmed = value.trim();
+            if trimmed.len() >= 3 {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Replaces the account name in file paths with `[username]`.
+///
+/// An export is written to be mailed into a bug report, and paths logged all
+/// over the app carry the user's home directory with their real name in it -
+/// `C:\Users\AroCodes\AppData\...` on Windows, `/home/...` and
+/// `/Users/...` elsewhere. The name is not diagnostic; the rest of the path
+/// is, so only the one component is replaced.
+///
+/// Applied at export rather than at [`push`], because the console output
+/// during `dx serve` is the developer's own machine and is more useful intact,
+/// and because this would otherwise run on every logging call rather than once
+/// per export.
+pub fn mask_user_paths(line: &str) -> String {
+    let Some(user) = current_user_name() else {
+        return line.to_string();
+    };
+    mask_name_in_paths(line, &user)
+}
+
+/// The masking itself, with the name passed in so it can be tested without
+/// depending on whichever account happens to be running the suite.
+fn mask_name_in_paths(line: &str, user: &str) -> String {
+    // Case-insensitive on Windows, where the same account appears as both
+    // `AroCodes` and `arocodes` depending on which API produced the path.
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    let needle = user.to_lowercase();
+
+    loop {
+        let haystack = rest.to_lowercase();
+        let Some(at) = haystack.find(&needle) else {
+            break;
+        };
+
+        // Only a whole path component, so a name that happens to occur inside
+        // a soundpack title or a longer word is left alone.
+        let before_ok = at == 0 || {
+            let prev = rest[..at].chars().next_back();
+            matches!(prev, Some('/') | Some('\\'))
+        };
+        let after = at + needle.len();
+        let after_ok =
+            after == rest.len() ||
+            matches!(rest[after..].chars().next(), Some('/') | Some('\\'));
+
+        out.push_str(&rest[..at]);
+        if before_ok && after_ok {
+            out.push_str("[username]");
+        } else {
+            out.push_str(&rest[at..after]);
+        }
+        rest = &rest[after..];
+    }
+
+    out.push_str(rest);
+    out
+}
+
 /// Header written at the top of an export, so a log arriving in a bug report
 /// carries the context that would otherwise have to be asked for.
 pub fn export_header() -> String {
@@ -237,9 +313,12 @@ pub fn export_header() -> String {
 
 /// Full export body: header followed by every buffered line.
 pub fn export_contents() -> String {
-    let mut out = export_header();
+    // Masking happens here, the single door every export goes through, for the
+    // same reason `push_verbose` masks key identities at its own door: a call
+    // site cannot forget what it never has to remember.
+    let mut out = mask_user_paths(&export_header());
     for line in snapshot() {
-        out.push_str(&line);
+        out.push_str(&mask_user_paths(&line));
         out.push('\n');
     }
     out
@@ -412,11 +491,19 @@ mod tests {
         let _guard = super::buffer_test_guard();
         reset();
 
-        push("alpha\nbeta");
+        // Markers rather than a buffer-wide count: the buffer is process-wide
+        // and another module's test can log into it mid-test.
+        push("multiline-alpha\nmultiline-beta");
+
         let lines = snapshot();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].ends_with("alpha"), "{}", lines[0]);
-        assert!(lines[1].ends_with("beta"), "{}", lines[1]);
+        let ours: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("multiline-"))
+            .collect();
+
+        assert_eq!(ours.len(), 2, "one push with a newline must become two entries: {:?}", lines);
+        assert!(ours[0].ends_with("multiline-alpha"), "{}", ours[0]);
+        assert!(ours[1].ends_with("multiline-beta"), "{}", ours[1]);
     }
 
     #[test]
@@ -477,7 +564,15 @@ mod tests {
         reset();
 
         push_verbose("🔬 TRACE key=KeyA total=3.1ms");
-        assert_eq!(len(), 0, "verbose off must cost nothing and capture nothing");
+
+        // Asserting on this line's absence rather than an empty buffer: the
+        // buffer is process-wide, so an unrelated test logging at the same
+        // moment would otherwise fail this one.
+        assert!(
+            !snapshot().iter().any(|line| line.contains("total=3.1ms")),
+            "verbose off must capture nothing: {:?}",
+            snapshot()
+        );
     }
 
     #[test]
@@ -488,11 +583,16 @@ mod tests {
         VERBOSE.store(true, Ordering::Relaxed);
         push_verbose("🔬 TRACE key=KeyA total=3.1ms");
 
+        // Find this test's own line: the buffer is process-wide, so another
+        // module's test can log into it between the push and the read.
         let lines = snapshot();
-        assert_eq!(lines.len(), 1);
-        assert!(!lines[0].contains("KeyA"), "raw key reached the buffer: {}", lines[0]);
-        assert!(lines[0].contains("key=***"), "{}", lines[0]);
-        assert!(lines[0].contains("total=3.1ms"), "{}", lines[0]);
+        let ours = lines
+            .iter()
+            .find(|line| line.contains("total=3.1ms"))
+            .unwrap_or_else(|| panic!("the verbose line never reached the buffer: {:?}", lines));
+
+        assert!(!ours.contains("KeyA"), "raw key reached the buffer: {}", ours);
+        assert!(ours.contains("key=***"), "{}", ours);
 
         VERBOSE.store(false, Ordering::Relaxed);
     }
@@ -522,8 +622,14 @@ mod tests {
         let _guard = super::buffer_test_guard();
         reset();
 
+        // A marker of this test's own, because the buffer is process-wide and
+        // `buffer_test_guard` only serialises tests inside this module: a test
+        // elsewhere logging through `always_print!` lands in here too. Asserting
+        // on an exact buffer count would then fail whenever that happened to
+        // land mid-test, which is how this test used to flake.
+        let marker = "export-header-line";
         for i in 0..5 {
-            push(&format!("event {}", i));
+            push(&format!("{} {}", marker, i));
         }
 
         let contents = export_contents();
@@ -537,12 +643,84 @@ mod tests {
         );
         assert!(contents.contains(std::env::consts::OS), "{}", contents);
         assert!(contents.contains("Verbose logging: off"), "{}", contents);
-        assert!(contents.contains("Lines captured: 5"), "{}", contents);
+
+        // The count is reported, and covers at least this test's own lines.
+        // The exact number belongs to whatever else the process logged.
+        let reported = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("Lines captured: "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("header must report a line count: {}", contents));
+        assert!(reported >= 5, "reported {} lines, expected at least 5", reported);
 
         // Body: all of it, not just the viewer's window.
         for i in 0..5 {
-            assert!(contents.contains(&format!("event {}", i)), "missing event {}", i);
+            assert!(
+                contents.contains(&format!("{} {}", marker, i)),
+                "missing {} {}",
+                marker,
+                i
+            );
         }
+    }
+
+    #[test]
+    fn the_export_hides_the_account_name_in_paths() {
+        let _guard = super::buffer_test_guard();
+        reset();
+
+        // The real account name, since that is what the masking reads and what
+        // an export on this machine would leak.
+        let Some(user) = super::current_user_name() else {
+            return; // No usable name here; nothing to assert.
+        };
+
+        push(&format!(r"soundpack_dir: C:\Users\{}\AppData\Local\MechvibesDX", user));
+        push(&format!("config: /home/{}/.config/mechvibes/config.json", user));
+
+        let contents = export_contents();
+
+        assert!(
+            !contents.contains(&user),
+            "the account name survived into an export meant for a bug report: {}",
+            contents
+        );
+        assert!(contents.contains("[username]"), "{}", contents);
+        // The rest of the path is the diagnostic part and has to survive.
+        assert!(contents.contains(r"\AppData\Local\MechvibesDX"), "{}", contents);
+        assert!(contents.contains("/.config/mechvibes/config.json"), "{}", contents);
+    }
+
+    #[test]
+    fn masking_replaces_whole_path_components_only() {
+        // A name embedded in a longer word is not a path component, and
+        // shredding ordinary words would cost more than it hides.
+        let masked = super::mask_name_in_paths(r"C:\Users\ada\ada-theme\adamant.ogg", "ada");
+
+        assert!(masked.contains(r"C:\Users\[username]\"), "{}", masked);
+        assert!(masked.contains("adamant.ogg"), "{}", masked);
+        assert!(masked.contains("ada-theme"), "{}", masked);
+    }
+
+    #[test]
+    fn masking_ignores_case_and_covers_both_path_separators() {
+        // Windows hands back the same account in either case depending on
+        // which API produced the path, and both separators show up in logs.
+        let masked = super::mask_name_in_paths(
+            r"C:\Users\AroCodes\x and /home/arocodes/y",
+            "arocodes"
+        );
+
+        assert!(!masked.to_lowercase().contains("arocodes"), "{}", masked);
+        assert_eq!(masked, r"C:\Users\[username]\x and /home/[username]/y");
+    }
+
+    #[test]
+    fn a_name_at_the_end_of_a_path_is_still_masked() {
+        // The home directory itself, with nothing after it.
+        let masked = super::mask_name_in_paths(r"home dir: C:\Users\arocodes", "arocodes");
+        assert_eq!(masked, r"home dir: C:\Users\[username]");
     }
 
     #[test]
@@ -728,7 +906,13 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        assert_eq!(len(), 0, "verbose off must capture nothing: {:?}", snapshot());
+        // This test's own trace lines, not the whole buffer: it is
+        // process-wide and another module's test can log into it here.
+        assert!(
+            !snapshot().iter().any(|line| line.contains("somepack")),
+            "verbose off must capture nothing: {:?}",
+            snapshot()
+        );
         assert_eq!(generation_before, generation(), "an idle app must not move the generation");
     }
 
@@ -744,7 +928,11 @@ mod tests {
             push_verbose("🔬 TRACE key=KeyA total=2.0ms");
         }
 
-        assert_eq!(len(), 0, "verbose off must capture nothing");
+        assert!(
+            !snapshot().iter().any(|line| line.contains("total=2.0ms")),
+            "verbose off must capture nothing: {:?}",
+            snapshot()
+        );
         assert_eq!(
             generation(),
             generation_before,

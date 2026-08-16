@@ -144,8 +144,50 @@ pub fn reload_current_soundpacks(audio_ctx: &crate::libs::audio::AudioContext) {
 pub fn init_app_state() {
     if GLOBAL_APP_STATE.get().is_none() {
         crate::always_print!("📝 Initializing global app state (mutex)...");
-        let _ = GLOBAL_APP_STATE.set(Mutex::new(AppState::new()));
+        let state = AppState::new();
+        record_known_soundpacks(&state);
+        let _ = GLOBAL_APP_STATE.set(Mutex::new(state));
     }
+}
+
+/// Gives every pack in the library an "added at" timestamp, so the lists can
+/// sort by it and new arrivals can be told apart from the rest.
+///
+/// On the first run after upgrading this stamps the whole library at once and
+/// marks it seen, so nobody opens the app to find every pack badged as new.
+/// Packs that appear later - imported, or dropped into the folder by hand -
+/// are stamped by the same path but keep their badge.
+fn record_known_soundpacks(state: &AppState) {
+    let folder_paths: Vec<String> = state.optimized_cache.soundpacks
+        .values()
+        .map(|pack| pack.folder_path.clone())
+        .filter(|path| !path.is_empty())
+        .collect();
+
+    if folder_paths.is_empty() {
+        return;
+    }
+
+    crate::state::config_writer::apply(|config| {
+        let first_run = config.soundpack_added_at.is_empty();
+        if first_run {
+            crate::state::soundpack_library::backfill_existing(
+                &mut config.soundpack_added_at,
+                &mut config.soundpacks_seen,
+                &folder_paths
+            );
+            return;
+        }
+
+        // Later runs: anything without a timestamp arrived since the last
+        // launch, so it is stamped and left unseen to earn a badge.
+        for folder_path in &folder_paths {
+            crate::state::soundpack_library::mark_added(
+                &mut config.soundpack_added_at,
+                folder_path
+            );
+        }
+    });
 }
 
 // Global update state

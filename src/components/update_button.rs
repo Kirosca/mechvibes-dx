@@ -1,22 +1,30 @@
-//! The "Download & install" button and its state machine.
+//! The "Update now" button and its state machine.
 //!
 //! Downloading is a deliberate user action: a background check only ever
-//! *notifies*, and nothing is transferred until this button is clicked. The
-//! whole flow is surfaced inside the button itself rather than in separate
-//! alerts, so there is exactly one place to look:
+//! *notifies*, and nothing is transferred until this button is clicked. One
+//! click then carries the update all the way through - download, verify,
+//! launch the installer, close the app - with no second confirmation:
 //!
 //! ```text
-//! Idle       "Download & install v0.7.0"
+//! Idle       "Update now"
 //!   click -> Downloading  spinner + "Downloading new version..." (disabled)
-//!         -> Ready        "Restart to finish update" + "Later"
-//!   click -> Installing   "Installing..." (disabled), app exits
-//!         -> Failed       short reason + "Open download page"
+//!         -> installs and exits automatically once verified
+//!         -> Failed       reason + "Retry", until a newer version appears
 //! ```
 //!
-//! `Failed` never leaves the user stuck: the browser link that predates the
-//! staged-download flow is always the way out.
+//! An installer left staged by an interrupted session is picked up on the next
+//! launch (`restore_staged_update`), so clicking again reuses it rather than
+//! downloading a second time.
+//!
+//! `Failed` records the version it failed on. It persists as a "Retry" button
+//! rather than clearing itself, so a failure is never silently forgotten, and
+//! a release newer than that version resets it to "Update now" - retrying a
+//! version that is no longer the latest would be the wrong offer. The browser
+//! link that predates the staged-download flow sits on its own line below
+//! `Retry`, because retrying cannot help a release with no installer asset.
 
 use crate::utils::auto_updater::{
+    clear_failed_update,
     download_and_stage_update,
     get_update_stage,
     install_staged_update,
@@ -40,15 +48,29 @@ pub fn UpdateInstallButton(info: UpdateInfo) -> Element {
     // so it is polled. Half a second is well under the time any step takes
     // and costs a single Mutex read.
     let mut stage = use_signal(get_update_stage);
-    let mut deferred = use_signal(|| false);
 
-    use_future(move || async move {
-        loop {
-            let current = get_update_stage();
-            if *stage.peek() != current {
-                stage.set(current);
+    // A failure sticks: the button becomes "Retry" and stays that way until
+    // it succeeds or a newer version appears. `Failed` carries the version it
+    // failed on, so a release newer than that one clears it back to a plain
+    // "Update now" - retrying a version that is no longer the latest would be
+    // the wrong offer.
+    let latest_version = info.latest_version.clone();
+    use_future(move || {
+        let latest_version = latest_version.clone();
+        async move {
+            loop {
+                if let UpdateStage::Failed { version, .. } = get_update_stage() {
+                    if version != latest_version {
+                        clear_failed_update();
+                    }
+                }
+
+                let current = get_update_stage();
+                if *stage.peek() != current {
+                    stage.set(current);
+                }
+                futures_timer::Delay::new(std::time::Duration::from_millis(500)).await;
             }
-            futures_timer::Delay::new(std::time::Duration::from_millis(500)).await;
         }
     });
 
@@ -78,6 +100,41 @@ pub fn UpdateInstallButton(info: UpdateInfo) -> Element {
       }
     };
 
+    // Shared by the first attempt and the retry: one click downloads,
+    // verifies, runs the installer and closes the app.
+    let start_update = {
+        let info = info.clone();
+        let window = window.clone();
+        move |_| {
+            let info = info.clone();
+            let window = window.clone();
+            spawn(async move {
+                download_and_stage_update(&info).await;
+
+                // `download_and_stage_update` reports through the shared stage
+                // rather than a return value, and it has several early exits
+                // (already downloading, no asset, transfer failed). Installing
+                // is therefore gated on reading the stage back, not on the
+                // await returning.
+                if !matches!(get_update_stage(), UpdateStage::Ready { .. }) {
+                    return;
+                }
+
+                match install_staged_update() {
+                    Ok(()) => {
+                        // Installer is running detached; close the app the
+                        // same way the tray Exit does, which also drops the
+                        // input worker's stdin and takes that child with it.
+                        window.close();
+                    }
+                    Err(e) => {
+                        crate::always_eprint!("❌ Could not start the update installer: {}", e);
+                    }
+                }
+            });
+        }
+    };
+
     match stage() {
         UpdateStage::Downloading { version } =>
             rsx! {
@@ -88,65 +145,36 @@ pub fn UpdateInstallButton(info: UpdateInfo) -> Element {
           div { class: "text-xs text-base-content/50 mt-1", "v{version}" }
         },
 
-        // Verified and on disk. Confirming the restart is a second, explicit
-        // click - the app is never torn down from under the user.
-        UpdateStage::Ready { version, .. } if !deferred() =>
+        // Verified and on disk. The click that started the download installs
+        // from here without asking again, so this is only ever shown for the
+        // moment between verification and the app exiting - or if launching
+        // the installer failed, in which case clicking retries it.
+        UpdateStage::Ready { version, .. } =>
             rsx! {
-          div { class: "flex items-center gap-2",
-            button {
-              class: "btn btn-success btn-sm",
-              onclick: move |_| {
-                  match install_staged_update() {
-                      Ok(()) => {
-                          // Installer is running detached; close the app the
-                          // same way the tray Exit does, which also drops the
-                          // input worker's stdin and takes that child with it.
-                          window.close();
-                      }
-                      Err(e) => {
-                          crate::always_eprint!("❌ Could not start the update installer: {}", e);
-                      }
-                  }
-              },
-              RefreshCw { class: "w-4 h-4 mr-1" }
-              "Restart to finish update"
-            }
-            button {
-              class: "btn btn-ghost btn-sm",
-              onclick: move |_| {
-                  // Session-local only. The verified file stays staged, so
-                  // returning to this button (or restarting the app) picks it
-                  // up without downloading again.
-                  deferred.set(true);
-              },
-              "Later"
-            }
+          button { class: "btn btn-success btn-sm", disabled: true,
+            span { class: "loading loading-spinner loading-xs mr-1" }
+            "Installing..."
           }
           div { class: "text-xs text-base-content/50 mt-1",
             "v{version} downloaded and verified."
           }
         },
 
-        // "Later" was chosen: offer the restart again without re-downloading.
-        UpdateStage::Ready { version, .. } =>
-            rsx! {
-          button {
-            class: "btn btn-success btn-soft btn-sm",
-            onclick: move |_| {
-                deferred.set(false);
-            },
-            RefreshCw { class: "w-4 h-4 mr-1" }
-            "Install v{version} now"
-          }
-          div { class: "text-xs text-base-content/50 mt-1",
-            "Already downloaded - installing takes a few seconds."
-          }
-        },
-
+        // Sticks until the retry succeeds or a newer version supersedes it.
+        // The browser link sits on its own line below the button, not beside
+        // it: a retry cannot help when the release has no installer asset or
+        // the network is blocked outright, so the way out has to stay visible
+        // without crowding the button.
         UpdateStage::Failed { reason, .. } =>
             rsx! {
-          div { class: "space-y-1",
+          div { class: "flex flex-col items-start gap-2",
             div { class: "text-sm text-warning", "{reason}" }
+            button {
+              class: "btn btn-warning btn-sm",
+              onclick: start_update,
+              RefreshCw { class: "w-4 h-4 mr-1" }
+              "Retry"
+            }
             {fallback_link}
           }
         },
@@ -155,17 +183,9 @@ pub fn UpdateInstallButton(info: UpdateInfo) -> Element {
             rsx! {
           button {
             class: "btn btn-success btn-sm",
-            onclick: {
-                let info = info.clone();
-                move |_| {
-                    let info = info.clone();
-                    spawn(async move {
-                        download_and_stage_update(&info).await;
-                    });
-                }
-            },
+            onclick: start_update,
             Download { class: "w-4 h-4 mr-1" }
-            "Download & install v{version}"
+            "Update now"
           }
         },
     }

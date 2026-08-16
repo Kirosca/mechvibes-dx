@@ -254,9 +254,10 @@ pub struct AutoUpdateConfig {
     pub last_check: Option<u64>,
     pub available_version: Option<String>,
     pub available_download_url: Option<String>,
-    /// An installer already downloaded and verified, kept so that choosing
-    /// "Later" survives a restart. `serde(default)` so configs written by
-    /// versions before this field deserialize instead of being reset.
+    /// An installer already downloaded and verified, kept so that a session
+    /// interrupted between download and install does not pay for the transfer
+    /// twice. `serde(default)` so configs written by versions before this
+    /// field deserialize instead of being reset.
     #[serde(default)]
     pub staged_update: Option<StagedUpdate>,
 }
@@ -362,9 +363,9 @@ impl UpdateService {
                                 update_info.latest_version
                             );
                             // Notify only. Downloading is a deliberate user
-                            // action (the "Download & install" button in
-                            // Settings), never something a background check
-                            // starts on its own.
+                            // action (the "Update now" button in Settings),
+                            // never something a background check starts on its
+                            // own.
                             crate::state::app::set_update_info(Some(update_info));
                         } else {
                             crate::always_print!("✅ No updates available");
@@ -428,7 +429,7 @@ impl UpdateService {
 /// with `Failed` as the terminal state that puts the UI back on the plain
 /// "open the browser" button that existed before staging did. `Ready` can also
 /// be entered directly at startup when a previous session staged an installer
-/// and the user chose "Later".
+/// but was interrupted before it ran.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum UpdateStage {
     /// Nothing found, or nothing to do on this platform.
@@ -438,7 +439,9 @@ pub enum UpdateStage {
     Downloading {
         version: String,
     },
-    /// Verified installer on disk, waiting for the user to pick Restart/Later.
+    /// Verified installer on disk. The click that started the download goes
+    /// straight on to run it; this is also where a restored staged installer
+    /// from an interrupted session lands.
     Ready {
         version: String,
         installer_path: String,
@@ -467,9 +470,23 @@ fn set_update_stage(stage: UpdateStage) {
     }
 }
 
+/// Clears a `Failed` stage back to `Idle` so the button returns to its normal
+/// state, used when a newer version than the one that failed shows up.
+///
+/// Only `Failed` is cleared: resetting out of `Downloading` would offer a
+/// second click while a transfer is still running, and resetting out of
+/// `Ready` would throw away a verified installer.
+pub fn clear_failed_update() {
+    if let Ok(mut guard) = UPDATE_STAGE.lock() {
+        if matches!(*guard, UpdateStage::Failed { .. }) {
+            *guard = UpdateStage::Idle;
+        }
+    }
+}
+
 /// Downloads and verifies the installer for `update_info`.
 ///
-/// Only ever called from the "Download & install" button - nothing in the
+/// Only ever called from the "Update now" button - nothing in the
 /// check paths starts a transfer, because a ~50 MB download is the user's
 /// decision to make, not a side effect of a background version check.
 ///
@@ -509,7 +526,7 @@ pub async fn download_and_stage_update(update_info: &UpdateInfo) {
     };
 
     // A staged installer from a previous session that still verifies is
-    // reused as-is, so choosing "Later" and coming back never costs a second
+    // reused as-is, so an interrupted session coming back never costs a second
     // download.
     let config = crate::state::config_writer::current();
     if let Some(staged) = &config.auto_update.staged_update {
@@ -569,9 +586,10 @@ pub fn is_upgrade(current: &str, candidate: &str) -> bool {
 /// Re-checks a staged installer at startup and, if it is still valid for an
 /// update we still want, puts the UI straight into `Ready`.
 ///
-/// This is the other half of "Later": the file survives, the prompt returns
-/// on the next launch. The hash is verified again rather than trusted from
-/// config, so a file altered between sessions is discarded, not executed.
+/// This covers a session that closed between the download finishing and the
+/// installer running: the file survives, the button returns on the next launch
+/// and reuses it. The hash is verified again rather than trusted from config,
+/// so a file altered between sessions is discarded, not executed.
 pub fn restore_staged_update() {
     if !update_installer::silent_update_supported() {
         return;

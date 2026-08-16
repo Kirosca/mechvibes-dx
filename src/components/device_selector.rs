@@ -18,10 +18,9 @@ pub enum DeviceType {
 /// Audio outputs already have an equivalent cache in `DeviceManager`.
 static ENUMERATED_INPUT_DEVICES: OnceLock<Mutex<Vec<InputDeviceInfo>>> = OnceLock::new();
 
-/// Whether the user has enumerated devices at least once this session.
-/// Enumeration stays lazy — nothing runs until the refresh button is pressed —
-/// but once it has run, re-entering the page shows the result instead of
-/// falling back to the "click refresh" placeholder.
+/// Whether devices have been enumerated at least once this session. Set on
+/// first mount, so re-entering the page reuses that result rather than
+/// enumerating again; only the refresh button re-runs enumeration.
 static DEVICES_ENUMERATED: OnceLock<Mutex<bool>> = OnceLock::new();
 
 fn input_device_cache() -> &'static Mutex<Vec<InputDeviceInfo>> {
@@ -87,6 +86,19 @@ pub fn DeviceSelector(props: DeviceSelectorProps) -> Element {
             DeviceType::Keyboard => (None, config.enabled_keyboards.clone()),
             DeviceType::Mouse => (None, config.enabled_mice.clone()),
         }
+    });
+
+    // Whether the saved audio device is among the ones enumerated. A selection
+    // that is missing (unplugged, or saved under an ID format that no longer
+    // resolves) is shown as the system default, which is what is actually
+    // playing in that case.
+    let selection_is_present = use_memo(move || {
+        let Some(selected) = current_selection().0 else {
+            return true;
+        };
+        audio_devices()
+            .iter()
+            .any(|device| device.id == selected)
     });
 
     // Load devices from cache (audio) or fresh (input devices)
@@ -179,34 +191,45 @@ pub fn DeviceSelector(props: DeviceSelectorProps) -> Element {
         })
     };
 
-    // Enumeration stays lazy: nothing is probed on first mount, because ALSA
-    // enumeration can interrupt audio playback. But once the user has loaded
-    // devices this session, restore that result on remount so switching tabs
-    // does not appear to wipe the list.
+    // The list is populated on mount rather than waiting for the refresh
+    // button, so opening Settings always shows devices.
+    //
+    // The cost this used to avoid is still avoided: enumeration itself is what
+    // can interrupt playback (cpal activates each device as the list is
+    // walked), and it runs at most once per session here. `initialize_cache`
+    // fills the audio cache on the first call and every later mount is a plain
+    // clone of it; input devices come from the session cache once enumerated.
+    // Refresh remains the only path that re-enumerates.
     use_hook({
         let mut audio_devices = audio_devices;
         let mut input_devices = input_devices;
         let mut has_loaded = has_loaded;
+        let load_cached = load_cached_devices;
         let device_type = props.device_type;
 
         move || {
-            if !have_devices_been_enumerated() {
-                return;
-            }
-
             match device_type {
                 DeviceType::AudioOutput => {
-                    // Reading the cache is a plain clone; it does not re-enumerate.
+                    // Reading the cache is a plain clone; it only enumerates
+                    // if this is the first read of the session.
                     if let Ok(device_list) = DeviceManager::get_cached_output_devices() {
                         audio_devices.set(device_list);
+                        mark_devices_enumerated();
+                        has_loaded.set(true);
                     }
                 }
                 DeviceType::Keyboard | DeviceType::Mouse => {
-                    input_devices.set(cached_input_devices());
+                    if have_devices_been_enumerated() {
+                        input_devices.set(cached_input_devices());
+                        has_loaded.set(true);
+                    } else {
+                        // No session cache yet, so enumerate once. Unlike the
+                        // audio path this has no manager-level cache to fall
+                        // back on.
+                        load_cached.call(());
+                    }
                 }
             }
-
-            has_loaded.set(true);
         }
     });
 
@@ -444,7 +467,7 @@ pub fn DeviceSelector(props: DeviceSelectorProps) -> Element {
                             div { class: "text-center text-base-content/50 py-8",
                                 {device_icon()}
                                 if !has_loaded() {
-                                    div { class: "mt-2 text-sm", "Click the refresh button to load available devices" }
+                                    div { class: "mt-2 text-sm", "Loading devices..." }
                                 } else {
                                     div { class: "mt-2 text-sm", "{no_devices_message()}" }
                                 }
@@ -460,8 +483,16 @@ pub fn DeviceSelector(props: DeviceSelectorProps) -> Element {
                                             r#type: "radio",
                                             name: "audio-device",
                                             class: "radio radio-xs radio-primary",
+                                            // "System Default" also takes the
+                                            // selection when the saved device
+                                            // is not in the list - it was
+                                            // unplugged, or its ID predates
+                                            // name-based IDs. Leaving every
+                                            // radio unchecked would show no
+                                            // selection at all while playback
+                                            // is in fact on the default.
                                             checked: if device_id == "default" {
-                                                current_selection().0.is_none()
+                                                current_selection().0.is_none() || !selection_is_present()
                                             } else {
                                                 current_selection().0.as_ref() == Some(device_id)
                                             },
@@ -499,7 +530,7 @@ pub fn DeviceSelector(props: DeviceSelectorProps) -> Element {
                             div { class: "text-center text-base-content/50 py-8",
                                 {device_icon()}
                                 if !has_loaded() {
-                                    div { class: "mt-2 text-sm", "Click the refresh button to load available devices" }
+                                    div { class: "mt-2 text-sm", "Loading devices..." }
                                 } else {
                                     div { class: "mt-2 text-sm", "{no_devices_message()}" }
                                 }

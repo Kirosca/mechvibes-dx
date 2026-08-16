@@ -54,6 +54,47 @@ impl Drop for AlsaErrorSuppressor {
     }
 }
 
+/// Builds the persisted identity for a device from its name.
+///
+/// Device IDs used to be `output_{index}`, where the index was the position in
+/// the enumeration order. That is not an identity: unplugging one device
+/// shifts every device after it down a slot, so a saved selection silently
+/// resolved to a different device. Deriving the ID from the name instead keeps
+/// a selection pointing at the same device across replugs.
+///
+/// cpal 0.15 exposes only `name()`; the `Device::id()` that would give a true
+/// backend identity arrived in cpal 0.17, and reaching it means moving to
+/// rodio 0.22, whose `OutputStream` API change lands on the audio engine. Two
+/// devices sharing a name (a pair of identical headsets) therefore still
+/// collide - accepted for now, see plans/260813-audio-device-follow-behavior.
+///
+/// The hash is FNV-1a rather than `DefaultHasher` on purpose: std makes no
+/// stability guarantee across Rust versions, and an ID that changes under the
+/// user would unpin their device on upgrade.
+fn device_id_from_name(prefix: &str, name: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in name.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    format!("{}_name:{:016x}", prefix, hash)
+}
+
+/// Whether `device_id` is a legacy `output_{index}`/`input_{index}` ID, which
+/// resolves by enumeration position and needs migrating to a name-based one.
+pub fn is_legacy_index_device_id(device_id: &str) -> bool {
+    for prefix in ["output_", "input_"] {
+        if let Some(rest) = device_id.strip_prefix(prefix) {
+            return rest.parse::<usize>().is_ok();
+        }
+    }
+    false
+}
+
 pub struct DeviceManager {
     host: Host,
 }
@@ -128,7 +169,7 @@ impl DeviceManager {
                         );
 
                         devices.push(DeviceInfo {
-                            id: format!("output_{}", index),
+                            id: device_id_from_name("output", &name),
                             name: name.clone(),
                             is_default,
                         });
@@ -171,7 +212,7 @@ impl DeviceManager {
 
         match self.host.input_devices() {
             Ok(device_iter) => {
-                for (index, device) in device_iter.enumerate() {
+                for device in device_iter {
                     if let Ok(name) = device.name() {
                         // Filter out low-level ALSA device aliases
                         #[cfg(target_os = "linux")]
@@ -196,7 +237,7 @@ impl DeviceManager {
                                 .as_ref();
 
                         devices.push(DeviceInfo {
-                            id: format!("input_{}", index),
+                            id: device_id_from_name("input", &name),
                             name: name.clone(),
                             is_default,
                         });
@@ -230,21 +271,28 @@ impl DeviceManager {
         #[cfg(target_os = "linux")]
         let _alsa_suppressor = AlsaErrorSuppressor::new();
 
-        // Parse index from device_id (format: "output_{index}")
-        if let Some(index_str) = device_id.strip_prefix("output_") {
-            if let Ok(target_index) = index_str.parse::<usize>() {
-                match self.host.output_devices() {
-                    Ok(device_iter) => {
-                        for (index, device) in device_iter.enumerate() {
-                            if index == target_index {
-                                return Ok(Some(device));
-                            }
+        match self.host.output_devices() {
+            Ok(device_iter) => {
+                // Legacy `output_{index}` IDs still resolve by position so a
+                // config written before name-based IDs keeps working until
+                // `Config::load` migrates it.
+                let legacy_index = device_id
+                    .strip_prefix("output_")
+                    .and_then(|rest| rest.parse::<usize>().ok());
+
+                for (index, device) in device_iter.enumerate() {
+                    if legacy_index == Some(index) {
+                        return Ok(Some(device));
+                    }
+                    if let Ok(name) = device.name() {
+                        if device_id_from_name("output", &name) == device_id {
+                            return Ok(Some(device));
                         }
                     }
-                    Err(e) => {
-                        return Err(format!("Failed to enumerate devices: {}", e));
-                    }
                 }
+            }
+            Err(e) => {
+                return Err(format!("Failed to enumerate devices: {}", e));
             }
         }
 
@@ -261,21 +309,27 @@ impl DeviceManager {
         #[cfg(target_os = "linux")]
         let _alsa_suppressor = AlsaErrorSuppressor::new();
 
-        // Parse index from device_id (format: "input_{index}")
-        if let Some(index_str) = device_id.strip_prefix("input_") {
-            if let Ok(target_index) = index_str.parse::<usize>() {
-                match self.host.input_devices() {
-                    Ok(device_iter) => {
-                        for (index, device) in device_iter.enumerate() {
-                            if index == target_index {
-                                return Ok(Some(device));
-                            }
+        match self.host.input_devices() {
+            Ok(device_iter) => {
+                // Legacy `input_{index}` IDs still resolve by position, as in
+                // `get_output_device_by_id`.
+                let legacy_index = device_id
+                    .strip_prefix("input_")
+                    .and_then(|rest| rest.parse::<usize>().ok());
+
+                for (index, device) in device_iter.enumerate() {
+                    if legacy_index == Some(index) {
+                        return Ok(Some(device));
+                    }
+                    if let Ok(name) = device.name() {
+                        if device_id_from_name("input", &name) == device_id {
+                            return Ok(Some(device));
                         }
                     }
-                    Err(e) => {
-                        return Err(format!("Failed to enumerate devices: {}", e));
-                    }
                 }
+            }
+            Err(e) => {
+                return Err(format!("Failed to enumerate devices: {}", e));
             }
         }
 
@@ -461,5 +515,49 @@ impl DeviceManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of a name-based ID: a saved selection has to survive
+    /// the device list changing around it. These are the exact hashes the
+    /// shipped build writes into config, so a change to the hash function
+    /// that would unpin every user's device fails here.
+    #[test]
+    fn device_id_is_stable_for_a_given_name() {
+        assert_eq!(
+            device_id_from_name("output", "Speakers (Realtek High Definition Audio)"),
+            device_id_from_name("output", "Speakers (Realtek High Definition Audio)")
+        );
+        assert_eq!(device_id_from_name("output", "Headphones"), "output_name:0b3a976597860826");
+    }
+
+    #[test]
+    fn device_id_differs_by_name_and_by_direction() {
+        assert_ne!(
+            device_id_from_name("output", "Headphones"),
+            device_id_from_name("output", "Speakers")
+        );
+        // An output and an input sharing a name must not collide - some
+        // headsets enumerate under the same string on both directions.
+        assert_ne!(
+            device_id_from_name("output", "Headset"),
+            device_id_from_name("input", "Headset")
+        );
+    }
+
+    #[test]
+    fn legacy_index_ids_are_recognised() {
+        assert!(is_legacy_index_device_id("output_0"));
+        assert!(is_legacy_index_device_id("input_12"));
+
+        // Name-based IDs and the system-default sentinel are not legacy, and
+        // must not be rewritten by the migration.
+        assert!(!is_legacy_index_device_id(&device_id_from_name("output", "Headphones")));
+        assert!(!is_legacy_index_device_id("default"));
+        assert!(!is_legacy_index_device_id("output_default"));
     }
 }

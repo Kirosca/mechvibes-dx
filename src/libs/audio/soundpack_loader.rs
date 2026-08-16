@@ -449,26 +449,60 @@ fn load_audio_with_symphonia(file_path: &str) -> Result<(Vec<f32>, u16, u32), St
     Ok((samples, channels, sample_rate))
 }
 
+/// Derives the `type/name` id the cache is keyed by from a pack's absolute
+/// path, trying both soundpack roots.
+///
+/// Kept separate from the two roots themselves so the path logic can be tested
+/// without a filesystem: `relative_soundpack_id` does the work.
+fn soundpack_id_from_path(soundpack_path: &str) -> String {
+    let roots = [
+        crate::utils::path::get_soundpacks_dir_absolute(),
+        crate::utils::path::get_custom_soundpacks_dir_absolute(),
+    ];
+    relative_soundpack_id(soundpack_path, &roots)
+}
+
+/// The id for `soundpack_path` relative to whichever of `roots` contains it.
+///
+/// Falls back to the last two path components rather than the folder name
+/// alone: an id without its `keyboard/`/`mouse/` prefix does not match the key
+/// the directory scanner uses, and inserting under it duplicates the pack in
+/// the cache and in every list rendered from it.
+fn relative_soundpack_id(soundpack_path: &str, roots: &[String]) -> String {
+    let path = std::path::Path::new(soundpack_path);
+
+    for root in roots {
+        if let Ok(relative) = path.strip_prefix(root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+    }
+
+    let mut tail: Vec<&str> = path
+        .components()
+        .rev()
+        .take(2)
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    tail.reverse();
+
+    if tail.is_empty() { "unknown".to_string() } else { tail.join("/") }
+}
+
 fn create_soundpack_metadata(
     soundpack_path: &str,
     soundpack: &SoundPack
 ) -> Result<SoundpackMetadata, String> {
     // Extract the soundpack ID from the full path
     // e.g., "/path/to/soundpacks/keyboard/Apex by teia" -> "keyboard/Apex by teia"
-    let soundpacks_dir = crate::utils::path::get_soundpacks_dir_absolute();
-    let id = if
-        let Ok(relative_path) = std::path::Path::new(soundpack_path).strip_prefix(&soundpacks_dir)
-    {
-        relative_path.to_string_lossy().replace('\\', "/")
-    } else {
-        // Fallback to just the folder name if we can't get relative path
-        std::path::Path
-            ::new(soundpack_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-    };
+    //
+    // Both roots have to be tried. Packs live under either the bundled
+    // directory or the custom one in app data, and the id has to come out as
+    // `type/name` for either: the scanner keys the cache that way, so an id
+    // that loses its `keyboard/` prefix here inserts a second entry for a pack
+    // already in the cache and the UI lists it twice. That is why only
+    // imported packs duplicated - bundled ones matched the first root and
+    // never reached the fallback.
+    let id = soundpack_id_from_path(soundpack_path);
 
     // Get file metadata
     let last_modified = match std::fs::metadata(soundpack_path) {
@@ -540,6 +574,25 @@ fn create_key_mappings(
     key_mappings
 }
 
+/// Translates a mouse pack's definition key into the button code the runtime
+/// actually emits.
+///
+/// V2 packs name their buttons directly (`MouseLeft`) and pass through
+/// untouched. The keyboard names are what Mechvibes V1 mouse packs carry: they
+/// were authored in the keyboard editor against iohook codes 1/2/3, which the
+/// V1 converter read through its keyboard table into `Escape`/`Digit1`/
+/// `Digit2`. The converter no longer does that, but packs converted by an
+/// earlier build are already on disk with those keys, so they are accepted
+/// here rather than left permanently silent.
+fn mouse_button_for_definition(definition: &str) -> &str {
+    match definition {
+        "Escape" => "MouseLeft",
+        "Digit1" => "MouseRight",
+        "Digit2" => "MouseMiddle",
+        other => other,
+    }
+}
+
 fn create_mouse_mappings(
     soundpack: &SoundPack,
     _samples: &[f32]
@@ -553,7 +606,10 @@ fn create_mouse_mappings(
                 .iter()
                 .map(|pair| (pair[0] as f64, pair[1] as f64))
                 .collect();
-            mouse_mappings.insert(button.clone(), converted_mappings);
+            mouse_mappings.insert(
+                mouse_button_for_definition(button).to_string(),
+                converted_mappings
+            );
         }
     } else {
         // This is a keyboard soundpack, create default mouse mappings from keyboard sounds
@@ -779,4 +835,81 @@ fn capture_soundpack_loading_error(soundpack_id: &str, error: &str) {
 
     cache.save();
     crate::always_print!("💾 Updated cache with error information for {}", soundpack_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ mouse_button_for_definition, relative_soundpack_id };
+
+    /// Joins with the running platform's separator. `Path::components` only
+    /// splits on the native one, so a hard-coded `\` is a single component on
+    /// Linux and the assertions below would be testing nothing there.
+    fn native_path(parts: &[&str]) -> String {
+        parts.join(std::path::MAIN_SEPARATOR_STR)
+    }
+
+    fn builtin_root() -> String {
+        native_path(&["", "opt", "MechvibesDX", "soundpacks"])
+    }
+
+    fn custom_root() -> String {
+        native_path(&["", "home", "someone", ".local", "share", "mechvibes", "soundpacks"])
+    }
+
+    fn roots() -> Vec<String> {
+        vec![builtin_root(), custom_root()]
+    }
+
+    #[test]
+    fn an_imported_pack_gets_the_same_id_the_scanner_uses() {
+        // Only the built-in root used to be tried, so a pack in app data fell
+        // through to a bare folder name. The scanner keys the cache by
+        // `mouse/Viper Mini`, so inserting `Viper Mini` alongside it left two
+        // entries for one pack and the selector listed it twice. Built-in
+        // packs matched the first root and never showed the bug.
+        assert_eq!(
+            relative_soundpack_id(
+                &native_path(&[&custom_root(), "mouse", "Viper Mini"]),
+                &roots()
+            ),
+            "mouse/Viper Mini"
+        );
+        assert_eq!(
+            relative_soundpack_id(
+                &native_path(&[&builtin_root(), "keyboard", "eg-oreo"]),
+                &roots()
+            ),
+            "keyboard/eg-oreo"
+        );
+    }
+
+    #[test]
+    fn a_path_under_no_known_root_still_keeps_its_type_prefix() {
+        // The fallback keeps two components rather than one, so even an
+        // unexpected location cannot produce a prefix-less id.
+        assert_eq!(
+            relative_soundpack_id(
+                &native_path(&["", "elsewhere", "mouse", "Model O"]),
+                &roots()
+            ),
+            "mouse/Model O"
+        );
+    }
+
+    #[test]
+    fn v1_era_definition_keys_map_onto_real_mouse_buttons() {
+        // Packs converted by an earlier build carry the keyboard names the old
+        // converter produced from iohook codes 1/2/3. Left silent, they load
+        // fine and never play - the whole of issue #38.
+        assert_eq!(mouse_button_for_definition("Escape"), "MouseLeft");
+        assert_eq!(mouse_button_for_definition("Digit1"), "MouseRight");
+        assert_eq!(mouse_button_for_definition("Digit2"), "MouseMiddle");
+    }
+
+    #[test]
+    fn v2_definition_keys_pass_through_unchanged() {
+        for button in ["MouseLeft", "MouseRight", "MouseMiddle"] {
+            assert_eq!(mouse_button_for_definition(button), button);
+        }
+    }
 }
