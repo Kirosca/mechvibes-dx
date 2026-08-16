@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-16
+
 ### Added
 
 - **Sound packs can now be sorted by name or by when you added them, and new ones are marked.** The lists have a sort button, and a pack you have just imported carries a "New" badge in both the pack manager and the pack picker until you select it. Previously the lists were ordered by the folder's modification time, which moved whenever anything inside a pack was touched and had nothing to do with when the pack arrived. Packs already in your library when you update keep their place and are not marked as new.
