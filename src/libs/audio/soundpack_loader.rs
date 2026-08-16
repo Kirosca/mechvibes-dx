@@ -841,11 +841,23 @@ fn capture_soundpack_loading_error(soundpack_id: &str, error: &str) {
 mod tests {
     use super::{ mouse_button_for_definition, relative_soundpack_id };
 
-    const BUILTIN: &str = r"C:\Program Files\MechvibesDX\soundpacks";
-    const CUSTOM: &str = r"C:\Users\someone\AppData\Roaming\Mechvibes\soundpacks";
+    /// Joins with the running platform's separator. `Path::components` only
+    /// splits on the native one, so a hard-coded `\` is a single component on
+    /// Linux and the assertions below would be testing nothing there.
+    fn native_path(parts: &[&str]) -> String {
+        parts.join(std::path::MAIN_SEPARATOR_STR)
+    }
+
+    fn builtin_root() -> String {
+        native_path(&["", "opt", "MechvibesDX", "soundpacks"])
+    }
+
+    fn custom_root() -> String {
+        native_path(&["", "home", "someone", ".local", "share", "mechvibes", "soundpacks"])
+    }
 
     fn roots() -> Vec<String> {
-        vec![BUILTIN.to_string(), CUSTOM.to_string()]
+        vec![builtin_root(), custom_root()]
     }
 
     #[test]
@@ -856,11 +868,17 @@ mod tests {
         // entries for one pack and the selector listed it twice. Built-in
         // packs matched the first root and never showed the bug.
         assert_eq!(
-            relative_soundpack_id(&format!(r"{}\mouse\Viper Mini", CUSTOM), &roots()),
+            relative_soundpack_id(
+                &native_path(&[&custom_root(), "mouse", "Viper Mini"]),
+                &roots()
+            ),
             "mouse/Viper Mini"
         );
         assert_eq!(
-            relative_soundpack_id(&format!(r"{}\keyboard\eg-oreo", BUILTIN), &roots()),
+            relative_soundpack_id(
+                &native_path(&[&builtin_root(), "keyboard", "eg-oreo"]),
+                &roots()
+            ),
             "keyboard/eg-oreo"
         );
     }
@@ -870,7 +888,10 @@ mod tests {
         // The fallback keeps two components rather than one, so even an
         // unexpected location cannot produce a prefix-less id.
         assert_eq!(
-            relative_soundpack_id(r"D:\elsewhere\mouse\Model O", &roots()),
+            relative_soundpack_id(
+                &native_path(&["", "elsewhere", "mouse", "Model O"]),
+                &roots()
+            ),
             "mouse/Model O"
         );
     }
