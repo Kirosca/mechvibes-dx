@@ -1,19 +1,38 @@
 ![image](https://github.com/user-attachments/assets/5aa36739-76c8-4a34-9a9b-7e9272927f22)
 
-# MechvibesDX
+# MechvibesDX (Enhanced Edition)
 
-Play rich keyboard and mouse sounds with every keystroke and click. A polyphonic, low-latency mechanical keyboard sound simulator for Windows, macOS, and Linux. Successor of Mechvibes, now with resample-on-load audio, dedicated audio engine thread, and one-click verified updates.
+Play rich keyboard and mouse sounds with every keystroke and click. A polyphonic, low-latency mechanical keyboard sound simulator for Windows, macOS, and Linux.
+
+---
+
+## ✨ 定制增强版特性 (Enhanced Highlights)
+
+本版本在原版 Mechvibes 及 DX 版的基础上进行了底层音频与按键捕获架构的重大重构，带来更纯净、更稳定、零延迟的打字音效体验：
+
+1. **🚀 原生多音频直接内存加载，零磁盘修改（Zero Disk Mutation）**：
+   - 彻底移除了原版将分散多音频（`1.wav`, `2.wav` 等）强制修改合并至磁盘的行为，不再改动 `config.json`，不生成 `.v1.backup` 与大体积 `concatenated_audio.wav`，音效包目录 100% 保持原始纯净。
+2. **🧩 双格式全能无缝兼容**：
+   - 原生兼容经典原版 Mechvibes（V1）与现代 DX 版（V2）所有音效包，即插即用，无需转换。
+3. **🎹 全系统全局快捷键 100% 实时发声**：
+   - 引入 `WH_KEYBOARD_LL` 系统底层全局钩子，完美解决 Windows 下按住 `Win` 再按 `空格`（输入法切换）、`Win + D`、`Win + E`、`Alt + Tab` 等系统热键被系统截留导致按下无声的问题，第 0 毫秒即时响应。
+4. **🔊 64 路超大并发声道，无损连发**：
+   - 并发音频通道提升至 64 路（MAX_VOICES），消除连续打字或连击时的音频生硬切断与爆音，声音连贯自然。
+5. **🛠️ 修复全部 Windows 键与经典键码映射**：
+   - 全面修复左/右 Win 键（`3675`/`3676`）、右 Alt（`3640`）、右 Ctrl（`3613`）、方向与导航功能键，所有特殊按键均可精准发声。
+
+---
 
 ## Download
 
 | Platform | Installer | Notes |
 |----------|-----------|-------|
-| **Windows** | [`MechvibesDX-*-Setup-x64.exe`](https://github.com/hainguyents13/mechvibes-dx/releases/latest) | One-click installer with automatic in-app updates (SHA-256 verified). |
-| **Linux (Debian/Ubuntu)** | [`mechvibes-dx_*_amd64.deb`](https://github.com/hainguyents13/mechvibes-dx/releases/latest) | `sudo dpkg -i`. Requires: `sudo usermod -a -G input $USER` + re-log. |
-| **Linux (any distro)** | [`mechvibes-dx-*-x86_64.AppImage`](https://github.com/hainguyents13/mechvibes-dx/releases/latest) | Portable (no install). Requires: `chmod +x` + same input group setup. |
-| **macOS** | [`mechvibes-dx-*-macos-arm64-experimental.dmg`](https://github.com/hainguyents13/mechvibes-dx/releases/latest) | Experimental, unsigned. Right-click the app, then Open to bypass Gatekeeper. |
+| **Windows** | [`MechvibesDX-*-Setup-x64.exe`](https://github.com/Kirosca/mechvibes-dx/releases/latest) | One-click installer with automatic in-app updates (SHA-256 verified). |
+| **Linux (Debian/Ubuntu)** | [`mechvibes-dx_*_amd64.deb`](https://github.com/Kirosca/mechvibes-dx/releases/latest) | `sudo dpkg -i`. Requires: `sudo usermod -a -G input $USER` + re-log. |
+| **Linux (any distro)** | [`mechvibes-dx-*-x86_64.AppImage`](https://github.com/Kirosca/mechvibes-dx/releases/latest) | Portable (no install). Requires: `chmod +x` + same input group setup. |
+| **macOS** | [`mechvibes-dx-*-macos-arm64-experimental.dmg`](https://github.com/Kirosca/mechvibes-dx/releases/latest) | Experimental, unsigned. Right-click the app, then Open to bypass Gatekeeper. |
 
-All links point to the [latest release](https://github.com/hainguyents13/mechvibes-dx/releases/latest); every release also ships a `SHA256SUMS.txt` covering all assets.
+All links point to the [latest release](https://github.com/Kirosca/mechvibes-dx/releases/latest); every release also ships a `SHA256SUMS.txt` covering all assets.
 
 ## Features
 
