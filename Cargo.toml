@@ -1,6 +1,6 @@
 [package]
 name = "mechvibes-dx"
-version = "0.8.2-v0.4"
+version = "0.8.2-v0.5"
 authors = ["Hải Nguyễn <hainguyen.ts13@gmail.com>"]
 edition = "2024"
 description = "A modern mechanical keyboard sound simulator with customizable soundpacks"

@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
 use std::env;
+#[allow(unused_imports)]
 use std::process::Command;
+#[allow(unused_imports)]
 use crate::utils::constants::{ APP_PROTOCOL, APP_NAME };
 
 #[cfg(target_os = "linux")]

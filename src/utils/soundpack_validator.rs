@@ -152,7 +152,7 @@ pub fn validate_soundpack_config(config_path: &str) -> SoundpackValidationResult
             config_version: config_version,
             detected_version: package_version,
             is_valid_v2: false,
-            can_be_converted: has_defines && has_sound_field, // Can convert if it looks like V1
+            can_be_converted: false,
             message: format!("Missing required fields: {}", missing_fields.join(", ")),
         }
     }

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(target_os = "windows")]
 use crate::utils::constants::APP_NAME;
 
 #[cfg(target_os = "windows")]
@@ -121,10 +122,10 @@ pub fn is_auto_startup_enabled() -> bool {
 }
 
 /// Set auto startup state (enable or disable)
-pub fn set_auto_startup(enable: bool) -> Result<(), String> {
+pub fn set_auto_startup(_enable: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        if enable { enable_auto_startup() } else { disable_auto_startup() }
+        if _enable { enable_auto_startup() } else { disable_auto_startup() }
     }
 
     #[cfg(not(target_os = "windows"))]
