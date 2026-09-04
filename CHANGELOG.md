@@ -4,7 +4,11 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.8.2-v0.7] - 2026-09-04
+
+### Added / Changed
+
+- **Fixed Windows key combination sound playback (e.g. `Win + Space`).** Implemented low-level keyboard hook (`WH_KEYBOARD_LL`) in the dedicated input worker process, ensuring immediate audio playback on physical key down for all Windows system hotkeys (`Win + Space`, `Win + D`, `Alt + Tab`, etc.) with zero latency and complete focus isolation.
 
 ## [0.8.2-v0.6] - 2026-09-04
 

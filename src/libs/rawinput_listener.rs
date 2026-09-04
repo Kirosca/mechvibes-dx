@@ -31,11 +31,58 @@ use std::collections::{ HashMap, HashSet };
 use std::ptr::null_mut;
 
 use winapi::shared::minwindef::{ LPARAM, LRESULT, UINT, WPARAM };
-use winapi::shared::windef::HWND;
+use winapi::shared::windef::{ HHOOK, HWND };
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::winuser::*;
 
 use crate::libs::input_device_manager::InputDeviceManager;
+
+static mut KEYBOARD_HOOK: HHOOK = null_mut();
+
+unsafe extern "system" fn low_level_keyboard_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code == HC_ACTION {
+        let kbd = &*(lparam as *const KBDLLHOOKSTRUCT);
+        // LLKHF_INJECTED is 0x00000010 (filter synthetic software injections like IME rewrites)
+        let is_injected = (kbd.flags & 0x10) != 0;
+        if !is_injected {
+            let is_up = (kbd.flags & 0x80) != 0;
+            let is_e0 = (kbd.flags & 0x01) != 0;
+            let is_down = (wparam == WM_KEYDOWN as WPARAM || wparam == WM_SYSKEYDOWN as WPARAM) && !is_up;
+            let is_release = (wparam == WM_KEYUP as WPARAM || wparam == WM_SYSKEYUP as WPARAM) || is_up;
+
+            if is_down || is_release {
+                if let Some(code_name) = map_vkey_to_code(kbd.vkCode as u16, kbd.scanCode as u16, is_e0) {
+                    STATE.with(|s| {
+                        let mut state_ref = s.borrow_mut();
+                        if let Some(state) = state_ref.as_mut() {
+                            if let Some(transition) = classify_key_transition(&mut state.pressed_keys, &code_name, is_release) {
+                                if transition == KeyTransition::OrphanUp {
+                                    (state.sink)(RawInputEvent {
+                                        kind: EventKind::Keyboard,
+                                        device_id: Some("-".to_string()),
+                                        code: &code_name,
+                                        is_down: true,
+                                    });
+                                }
+                                (state.sink)(RawInputEvent {
+                                    kind: EventKind::Keyboard,
+                                    device_id: Some("-".to_string()),
+                                    code: &code_name,
+                                    is_down: !is_release,
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+    CallNextHookEx(null_mut(), code, wparam, lparam)
+}
 
 /// One captured input event, before it is turned into a wire line.
 ///
@@ -161,7 +208,23 @@ fn run_message_loop() -> Result<(), String> {
             return Err(format!("CreateWindowExW failed (GetLastError={})", err));
         }
 
-        register_raw_input_devices(hwnd)?;
+        let hook = SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(low_level_keyboard_proc),
+            hinstance,
+            0,
+        );
+
+        let hook_installed = !hook.is_null();
+        if hook_installed {
+            KEYBOARD_HOOK = hook;
+            eprintln!("[worker] Low-level keyboard hook installed successfully (all shortcuts supported)");
+            register_raw_input_devices(hwnd, false)?;
+        } else {
+            let err = winapi::um::errhandlingapi::GetLastError();
+            eprintln!("[worker] SetWindowsHookExW failed (GetLastError={}), falling back to Raw Input keyboard", err);
+            register_raw_input_devices(hwnd, true)?;
+        }
 
         eprintln!("[worker] Raw Input registered, listening (focus-independent)");
 
@@ -175,6 +238,10 @@ fn run_message_loop() -> Result<(), String> {
                 } // WM_QUIT
                 -1 => {
                     let err = winapi::um::errhandlingapi::GetLastError();
+                    if !KEYBOARD_HOOK.is_null() {
+                        UnhookWindowsHookEx(KEYBOARD_HOOK);
+                        KEYBOARD_HOOK = null_mut();
+                    }
                     return Err(format!("GetMessageW failed (GetLastError={})", err));
                 }
                 _ => {
@@ -183,26 +250,32 @@ fn run_message_loop() -> Result<(), String> {
                 }
             }
         }
+
+        if !KEYBOARD_HOOK.is_null() {
+            UnhookWindowsHookEx(KEYBOARD_HOOK);
+            KEYBOARD_HOOK = null_mut();
+        }
     }
 
     Ok(())
 }
 
-fn register_raw_input_devices(hwnd: HWND) -> Result<(), String> {
-    let devices = [
-        RAWINPUTDEVICE {
+fn register_raw_input_devices(hwnd: HWND, enable_keyboard: bool) -> Result<(), String> {
+    let mut devices = Vec::new();
+    if enable_keyboard {
+        devices.push(RAWINPUTDEVICE {
             usUsagePage: 0x01, // Generic Desktop Controls
             usUsage: 0x06, // Keyboard
             dwFlags: RIDEV_INPUTSINK,
             hwndTarget: hwnd,
-        },
-        RAWINPUTDEVICE {
-            usUsagePage: 0x01,
-            usUsage: 0x02, // Mouse
-            dwFlags: RIDEV_INPUTSINK,
-            hwndTarget: hwnd,
-        },
-    ];
+        });
+    }
+    devices.push(RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02, // Mouse
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    });
 
     let ok = unsafe {
         RegisterRawInputDevices(
