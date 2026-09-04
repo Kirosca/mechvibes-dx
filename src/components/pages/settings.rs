@@ -325,7 +325,7 @@ pub fn SettingsPage() -> Element {
                         }
                         div {
                           a {
-                            href: "https://github.com/hainguyents13/mechvibes-dx/releases/tag/v{saved.latest_version}",
+                            href: "https://github.com/Kirosca/mechvibes-dx/releases/tag/v{saved.latest_version}",
                             target: "_blank",
                             class: "link link-hover text-xs text-base-content/70",
                             "View release notes"
@@ -444,18 +444,18 @@ pub fn SettingsPage() -> Element {
               Heart { class: "inline w-3.5 h-3.5 -mt-1 text-primary/70 fill-primary/30" }
               span { " by " }
               a {
+                href: "https://github.com/Kirosca/mechvibes-dx",
+                target: "_blank",
+                class: "link ",
+                "Kirosca"
+              }
+              br {}
+              " based on "
+              a {
                 href: "https://github.com/hainguyents13/mechvibes-dx",
                 target: "_blank",
                 class: "link ",
                 "hainguyents13"
-              }
-              br {}
-              " and "
-              a {
-                href: "https://github.com/hainguyents13/mechvibes-dx/graphs/contributors?all=1",
-                target: "_blank",
-                class: "link ",
-                "these awesome people"
               }
             }
           }
