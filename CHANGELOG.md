@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-04
+
+### Fixed
+
+- **Windows keys and legacy navigation/modifier keys now correctly make sound.** Fixed keycode mapping discrepancies where standard classic Mechvibes keys (such as Windows key 3675/3676, Right Alt 3640, Right Ctrl 3613, Ins/Del/Home/End/PgUp/PgDn, and Win32 keycodes) were erroneously mapped to numpad keys or dropped during V1 to V2 migration.
+- **Improved compatibility for legacy multi-audio soundpacks.** Enhanced soundpack converter to support both string and array audio file definitions per key and handle prefixed keycodes seamlessly.
+
 ## [0.8.2] - 2026-08-16
 
 ### Added

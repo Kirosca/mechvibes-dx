@@ -163,7 +163,10 @@ pub fn convert_v1_to_v2(
         if let Some(defines) = config.get("defines").and_then(|d| d.as_object()) {
             // Sort keys to ensure consistent order
             let mut sorted_keys: Vec<_> = defines.keys().collect();
-            sorted_keys.sort_by_key(|k| k.parse::<u32>().unwrap_or(0));
+            sorted_keys.sort_by_key(|k| {
+                let clean = k.trim_start_matches("keycode-").trim_start_matches("key_").trim_start_matches("key-");
+                clean.parse::<u32>().unwrap_or(0)
+            });
 
             for key in sorted_keys {
                 if let Some(value) = defines.get(key) {
@@ -173,9 +176,21 @@ pub fn convert_v1_to_v2(
                             filename != "null" &&
                             !seen_files.contains(filename)
                         {
-                            // Just collect the files, we'll get timing from concatenation
                             audio_files_ordered.push(filename.to_string());
                             seen_files.insert(filename.to_string());
+                        }
+                    } else if let Some(arr) = value.as_array() {
+                        for item in arr {
+                            if let Some(filename) = item.as_str() {
+                                if
+                                    !filename.is_empty() &&
+                                    filename != "null" &&
+                                    !seen_files.contains(filename)
+                                {
+                                    audio_files_ordered.push(filename.to_string());
+                                    seen_files.insert(filename.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -281,8 +296,23 @@ pub fn convert_v1_to_v2(
             for (iohook_code, value) in ordered {
                 if let Some((iohook_num, _)) = iohook_code_and_press(iohook_code) {
                     if let Some(key_name) = key_mappings.get(&iohook_num) {
+                        let mut audio_filenames = Vec::new();
                         if let Some(audio_filename) = value.as_str() {
                             if !audio_filename.is_empty() && audio_filename != "null" {
+                                audio_filenames.push(audio_filename);
+                            }
+                        } else if let Some(arr) = value.as_array() {
+                            for item in arr {
+                                if let Some(audio_filename) = item.as_str() {
+                                    if !audio_filename.is_empty() && audio_filename != "null" {
+                                        audio_filenames.push(audio_filename);
+                                    }
+                                }
+                            }
+                        }
+
+                        if !audio_filenames.is_empty() {
+                            for audio_filename in audio_filenames {
                                 let mut key_def = Map::new();
 
                                 // Get offset and duration for this audio file
@@ -367,9 +397,9 @@ pub fn convert_v1_to_v2(
                                 } else {
                                     crate::always_print!("   ⚠️ No offset found for audio file: {}", audio_filename);
                                 }
-                            } else {
-                                crate::always_print!("   ⚠️ Key IOHook {} has empty/null audio file", iohook_code);
                             }
+                        } else {
+                            crate::always_print!("   ⚠️ Key IOHook {} has empty/null audio file", iohook_code);
                         }
                     } else {
                         crate::always_print!("   ⚠️ No key mapping found for IOHook code: {}", iohook_code);
@@ -977,8 +1007,12 @@ fn save_audio_file(
 /// A leading zero only means this for a multi-character key, so `"0"` itself
 /// and ordinary codes like `"10"` are read normally.
 fn iohook_code_and_press(define_key: &str) -> Option<(u32, bool)> {
-    let is_press = !(define_key.len() > 1 && define_key.starts_with('0'));
-    let code = define_key.parse::<u32>().ok()?;
+    let clean = define_key
+        .trim_start_matches("keycode-")
+        .trim_start_matches("key_")
+        .trim_start_matches("key-");
+    let is_press = !(clean.len() > 1 && clean.starts_with('0'));
+    let code = clean.parse::<u32>().ok()?;
     Some((code, is_press))
 }
 
@@ -1107,28 +1141,42 @@ fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
     mapping.insert(125, "IntlYen".to_string()); // VC_YEN = 0x007D
     mapping.insert(126, "NumpadComma".to_string()); // VC_KP_COMMA = 0x007E
 
-    // Extended keys (proper extended scancode values)
-    // Extended numpad and control keys
-    mapping.insert(3637, "NumpadDivide".to_string()); // VC_KP_DIVIDE = 0x0E35
-    mapping.insert(3612, "NumpadEnter".to_string()); // VC_KP_ENTER = 0x0E1C
-    mapping.insert(3597, "ControlRight".to_string()); // VC_CONTROL_R = 0x0E1D
-    mapping.insert(3645, "NumpadEquals".to_string()); // VC_KP_EQUALS = 0x0E0D    // Navigation cluster - using CORRECT 0xE0xx values (fixed from incorrect mapping)
+    // Extended keys (0x0Exx standard IOHook values used in classic Mechvibes)
+    mapping.insert(3637, "NumpadDivide".to_string()); // VC_KP_DIVIDE = 0x0E35 = 3637
+    mapping.insert(3612, "NumpadEnter".to_string()); // VC_KP_ENTER = 0x0E1C = 3612
+    mapping.insert(3613, "ControlRight".to_string()); // VC_CONTROL_R = 0x0E1D = 3613
+    mapping.insert(3597, "ControlRight".to_string()); // VC_CONTROL_R alias
+    mapping.insert(3645, "NumpadEquals".to_string()); // VC_KP_EQUALS = 0x0E0D = 3645
+    mapping.insert(3639, "PrintScreen".to_string()); // VC_PRINTSCREEN = 0x0E37 = 3639
+    mapping.insert(3653, "Pause".to_string()); // VC_PAUSE = 0x0E45 = 3653
+    mapping.insert(3655, "Home".to_string()); // VC_HOME = 0x0E47 = 3655
+    mapping.insert(3657, "PageUp".to_string()); // VC_PAGE_UP = 0x0E49 = 3657
+    mapping.insert(3663, "End".to_string()); // VC_END = 0x0E4F = 3663
+    mapping.insert(3665, "PageDown".to_string()); // VC_PAGE_DOWN = 0x0E51 = 3665
+    mapping.insert(3666, "Insert".to_string()); // VC_INSERT = 0x0E52 = 3666
+    mapping.insert(3667, "Delete".to_string()); // VC_DELETE = 0x0E53 = 3667
+    mapping.insert(3640, "AltRight".to_string()); // VC_ALT_R = 0x0E38 = 3640
+    mapping.insert(3675, "MetaLeft".to_string()); // VC_META_L = 0x0E5B = 3675 (Windows Key Left)
+    mapping.insert(3676, "MetaRight".to_string()); // VC_META_R = 0x0E5C = 3676 (Windows Key Right)
+    mapping.insert(3677, "ContextMenu".to_string()); // VC_CONTEXT_MENU = 0x0E5D = 3677
+
+    // Navigation & Extended cluster using 0xE0xx values (57xxx series)
     mapping.insert(57399, "PrintScreen".to_string()); // VC_PRINTSCREEN = 0xE037 = 57399
-    mapping.insert(58437, "Pause".to_string()); // VC_PAUSE = 0xE045 = 57413 (keeping old for compatibility)
+    mapping.insert(58437, "Pause".to_string()); // VC_PAUSE = 0xE045 = 57413/58437
     mapping.insert(57415, "Home".to_string()); // VC_HOME = 0xE047 = 57415
-    mapping.insert(57416, "ArrowUp".to_string()); // VC_UP = 0xE048 = 57416 ✓ CORRECT
+    mapping.insert(57416, "ArrowUp".to_string()); // VC_UP = 0xE048 = 57416
     mapping.insert(57417, "PageUp".to_string()); // VC_PAGE_UP = 0xE049 = 57417
-    mapping.insert(57419, "ArrowLeft".to_string()); // VC_LEFT = 0xE04B = 57419 ✓ CORRECT
-    mapping.insert(57421, "ArrowRight".to_string()); // VC_RIGHT = 0xE04D = 57421 ✓ CORRECT
+    mapping.insert(57419, "ArrowLeft".to_string()); // VC_LEFT = 0xE04B = 57419
+    mapping.insert(57421, "ArrowRight".to_string()); // VC_RIGHT = 0xE04D = 57421
     mapping.insert(57423, "End".to_string()); // VC_END = 0xE04F = 57423
-    mapping.insert(57424, "ArrowDown".to_string()); // VC_DOWN = 0xE050 = 57424 ✓ CORRECT
+    mapping.insert(57424, "ArrowDown".to_string()); // VC_DOWN = 0xE050 = 57424
     mapping.insert(57425, "PageDown".to_string()); // VC_PAGE_DOWN = 0xE051 = 57425
     mapping.insert(57426, "Insert".to_string()); // VC_INSERT = 0xE052 = 57426
-    mapping.insert(57427, "Delete".to_string()); // VC_DELETE = 0xE053 = 57427    // Extended modifier keys - using CORRECT IOHook values
+    mapping.insert(57427, "Delete".to_string()); // VC_DELETE = 0xE053 = 57427
     mapping.insert(57400, "AltRight".to_string()); // VC_ALT_R = 0xE038 = 57400
     mapping.insert(57435, "MetaLeft".to_string()); // VC_META_L = 0xE05B = 57435
     mapping.insert(57436, "MetaRight".to_string()); // VC_META_R = 0xE05C = 57436
-    mapping.insert(57437, "ContextMenu".to_string()); // VC_CONTEXT_MENU = 0xE05D = 57437    // Power and sleep keys - using CORRECT IOHook values
+    mapping.insert(57437, "ContextMenu".to_string()); // VC_CONTEXT_MENU = 0xE05D = 57437
     mapping.insert(57438, "Power".to_string()); // VC_POWER = 0xE05E = 57438
     mapping.insert(57439, "Sleep".to_string()); // VC_SLEEP = 0xE05F = 57439
     mapping.insert(57443, "WakeUp".to_string()); // VC_WAKE = 0xE063 = 57443
@@ -1154,44 +1202,21 @@ fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
     mapping.insert(57452, "LaunchMail".to_string()); // VC_APP_MAIL = 0xE06C
     mapping.insert(57453, "MediaSelect".to_string()); // VC_MEDIA_SELECT = 0xE06D
 
-    // Alternate keycode ranges for compatibility
-    // Some systems may report different keycode values for extended keys
-
     // Clear key and additional special keys
-    mapping.insert(58444, "Clear".to_string()); // VC_CLEAR = 0xE04C (alternate)
+    mapping.insert(58444, "Clear".to_string()); // VC_CLEAR = 0xE04C
     mapping.insert(58470, "IntlBackslash".to_string()); // VC_LESSER_GREATER = 0xE046
 
-    // Legacy compatibility mappings for V1 configs and alternative implementations
-    // These handle cases where different IOHook implementations use different ranges
-
-    // Alternative numpad mappings (some implementations use these ranges)
-    mapping.insert(3597, "NumLock".to_string()); // Alternative range
-    mapping.insert(3612, "NumpadDivide".to_string()); // Alternative range
-    mapping.insert(3613, "NumpadMultiply".to_string()); // Alternative range
-    mapping.insert(3639, "Numpad7".to_string()); // Alternative range
-    mapping.insert(3640, "Numpad8".to_string()); // Alternative range
-    mapping.insert(3653, "Numpad9".to_string()); // Alternative range
-    mapping.insert(3655, "NumpadAdd".to_string()); // Alternative range
-    mapping.insert(3657, "Numpad4".to_string()); // Alternative range
-    mapping.insert(3663, "Numpad5".to_string()); // Alternative range
-    mapping.insert(3665, "Numpad6".to_string()); // Alternative range
-    mapping.insert(3666, "Numpad1".to_string()); // Alternative range
-    mapping.insert(3667, "Numpad2".to_string()); // Alternative range
-    mapping.insert(3675, "Numpad3".to_string()); // Alternative range
-    mapping.insert(3676, "NumpadEnter".to_string()); // Alternative range
-    mapping.insert(3677, "Numpad0".to_string()); // Alternative range
-
-    // Alternative extended key mappings for broader compatibility
-    mapping.insert(60999, "Insert".to_string()); // V1 compatibility
-    mapping.insert(61000, "Delete".to_string()); // V1 compatibility
-    mapping.insert(61001, "Home".to_string()); // V1 compatibility
-    mapping.insert(61003, "End".to_string()); // V1 compatibility
-    mapping.insert(61005, "PageUp".to_string()); // V1 compatibility
-    mapping.insert(61007, "PageDown".to_string()); // V1 compatibility
-    mapping.insert(61008, "PrintScreen".to_string()); // V1 compatibility
-    mapping.insert(61009, "ScrollLock".to_string()); // V1 compatibility
-    mapping.insert(61010, "Pause".to_string()); // V1 compatibility
-    mapping.insert(61011, "NumpadDecimal".to_string()); // V1 compatibility
+    // Classic Mechvibes Win32 remapped keycodes (from win32 table in keycodes.js)
+    mapping.insert(60999, "Home".to_string()); // Home
+    mapping.insert(61000, "ArrowUp".to_string()); // ArrowUp
+    mapping.insert(61001, "PageUp".to_string()); // PageUp
+    mapping.insert(61003, "ArrowLeft".to_string()); // ArrowLeft
+    mapping.insert(61005, "ArrowRight".to_string()); // ArrowRight
+    mapping.insert(61007, "End".to_string()); // End
+    mapping.insert(61008, "ArrowDown".to_string()); // ArrowDown
+    mapping.insert(61009, "PageDown".to_string()); // PageDown
+    mapping.insert(61010, "Insert".to_string()); // Insert
+    mapping.insert(61011, "Delete".to_string()); // Delete
 
     // Additional platform-specific keycodes that might appear
     mapping.insert(94, "IntlBackslash".to_string()); // Less/Greater key on some keyboards
@@ -1311,6 +1336,37 @@ mod tests {
         let keyboard = create_iohook_to_web_key_mapping();
         assert_eq!(keyboard.get(&1).map(String::as_str), Some("Escape"));
         assert_eq!(keyboard.get(&2).map(String::as_str), Some("Digit1"));
+    }
+
+    #[test]
+    fn test_v1_keyboard_legacy_keys_mapping() {
+        let keyboard = create_iohook_to_web_key_mapping();
+        // Standard IOHook / Classic Mechvibes mapping
+        assert_eq!(keyboard.get(&3675).map(String::as_str), Some("MetaLeft"));
+        assert_eq!(keyboard.get(&3676).map(String::as_str), Some("MetaRight"));
+        assert_eq!(keyboard.get(&3640).map(String::as_str), Some("AltRight"));
+        assert_eq!(keyboard.get(&3613).map(String::as_str), Some("ControlRight"));
+        assert_eq!(keyboard.get(&3666).map(String::as_str), Some("Insert"));
+        assert_eq!(keyboard.get(&3667).map(String::as_str), Some("Delete"));
+        assert_eq!(keyboard.get(&3655).map(String::as_str), Some("Home"));
+        assert_eq!(keyboard.get(&3663).map(String::as_str), Some("End"));
+        assert_eq!(keyboard.get(&3657).map(String::as_str), Some("PageUp"));
+        assert_eq!(keyboard.get(&3665).map(String::as_str), Some("PageDown"));
+        assert_eq!(keyboard.get(&3639).map(String::as_str), Some("PrintScreen"));
+        assert_eq!(keyboard.get(&3653).map(String::as_str), Some("Pause"));
+        assert_eq!(keyboard.get(&3677).map(String::as_str), Some("ContextMenu"));
+
+        // Win32 remapped codes
+        assert_eq!(keyboard.get(&60999).map(String::as_str), Some("Home"));
+        assert_eq!(keyboard.get(&61000).map(String::as_str), Some("ArrowUp"));
+        assert_eq!(keyboard.get(&61001).map(String::as_str), Some("PageUp"));
+        assert_eq!(keyboard.get(&61003).map(String::as_str), Some("ArrowLeft"));
+        assert_eq!(keyboard.get(&61005).map(String::as_str), Some("ArrowRight"));
+        assert_eq!(keyboard.get(&61007).map(String::as_str), Some("End"));
+        assert_eq!(keyboard.get(&61008).map(String::as_str), Some("ArrowDown"));
+        assert_eq!(keyboard.get(&61009).map(String::as_str), Some("PageDown"));
+        assert_eq!(keyboard.get(&61010).map(String::as_str), Some("Insert"));
+        assert_eq!(keyboard.get(&61011).map(String::as_str), Some("Delete"));
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
