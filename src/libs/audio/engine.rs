@@ -10,7 +10,7 @@ use crate::libs::device_manager::DeviceManager;
 const FADE_IN_MS: f32 = 2.0;
 const FADE_OUT_MS: f32 = 5.0;
 const EVICT_RAMP_MS: u64 = 10;
-const MAX_VOICES: usize = 32;
+const MAX_VOICES: usize = 64;
 
 /// (samples, channels, sample_rate) for a decoded/resampled audio buffer.
 type DecodedAudio = (Arc<Vec<f32>>, u16, u32);
@@ -129,6 +129,11 @@ pub(super) struct EngineState {
     pub(super) key_map: HashMap<String, Vec<[f32; 2]>>,
     pub(super) mouse_map: HashMap<String, Vec<[f32; 2]>>,
 
+    pub(super) keyboard_multi_samples: HashMap<String, Vec<DecodedAudio>>,
+    pub(super) keyboard_multi_samples_original: HashMap<String, Vec<DecodedAudio>>,
+    pub(super) mouse_multi_samples: HashMap<String, Vec<DecodedAudio>>,
+    pub(super) mouse_multi_samples_original: HashMap<String, Vec<DecodedAudio>>,
+
     key_pressed: HashMap<String, bool>,
     mouse_pressed: HashMap<String, bool>,
     pub(super) key_sinks: Vec<Sink>,
@@ -198,6 +203,10 @@ impl EngineState {
             mouse_samples_original: None,
             key_map: HashMap::new(),
             mouse_map: HashMap::new(),
+            keyboard_multi_samples: HashMap::new(),
+            keyboard_multi_samples_original: HashMap::new(),
+            mouse_multi_samples: HashMap::new(),
+            mouse_multi_samples_original: HashMap::new(),
             key_pressed: HashMap::new(),
             mouse_pressed: HashMap::new(),
             key_sinks: Vec::new(),
@@ -216,6 +225,25 @@ impl EngineState {
         }
         if !debounce_press(&mut self.key_pressed, code, down) {
             return;
+        }
+        if down {
+            if let Some(audio_list) = self.keyboard_multi_samples.get(code) {
+                if !audio_list.is_empty() {
+                    let audio = if audio_list.len() == 1 {
+                        &audio_list[0]
+                    } else {
+                        let idx = rand::random::<usize>() % audio_list.len();
+                        &audio_list[idx]
+                    };
+                    play_full_buffer(
+                        &self.stream_handle,
+                        audio,
+                        self.volume,
+                        &mut self.key_sinks
+                    );
+                    return;
+                }
+            }
         }
         if let Some((start, end)) = lookup_timing(&self.key_map, code, down) {
             play_segment(
@@ -236,6 +264,25 @@ impl EngineState {
         }
         if !debounce_press(&mut self.mouse_pressed, code, down) {
             return;
+        }
+        if down {
+            if let Some(audio_list) = self.mouse_multi_samples.get(code) {
+                if !audio_list.is_empty() {
+                    let audio = if audio_list.len() == 1 {
+                        &audio_list[0]
+                    } else {
+                        let idx = rand::random::<usize>() % audio_list.len();
+                        &audio_list[idx]
+                    };
+                    play_full_buffer(
+                        &self.stream_handle,
+                        audio,
+                        self.mouse_volume,
+                        &mut self.mouse_sinks
+                    );
+                    return;
+                }
+            }
         }
         if let Some((start, end)) = lookup_timing(&self.mouse_map, code, down) {
             play_segment(
@@ -273,6 +320,24 @@ impl EngineState {
             );
         }
 
+        self.keyboard_multi_samples.clear();
+        for (k, list) in &self.keyboard_multi_samples_original {
+            let mut resampled_list = Vec::new();
+            for (orig_samples, channels, orig_rate) in list {
+                resampled_list.push(resample_if_needed(orig_samples, *channels, *orig_rate, new_rate));
+            }
+            self.keyboard_multi_samples.insert(k.clone(), resampled_list);
+        }
+
+        self.mouse_multi_samples.clear();
+        for (k, list) in &self.mouse_multi_samples_original {
+            let mut resampled_list = Vec::new();
+            for (orig_samples, channels, orig_rate) in list {
+                resampled_list.push(resample_if_needed(orig_samples, *channels, *orig_rate, new_rate));
+            }
+            self.mouse_multi_samples.insert(k.clone(), resampled_list);
+        }
+
         // Drop old voices/stream only after the new one is confirmed open,
         // so a failed switch leaves the previous device still playing.
         self.key_sinks.clear();
@@ -284,7 +349,7 @@ impl EngineState {
 
         let label = self.current_device_id.clone().unwrap_or_else(|| "System Default".to_string());
         Ok(label)
-    }
+    } }
 }
 
 /// Whether a keystroke should produce sound, given the global mute flag and
@@ -371,6 +436,26 @@ fn play_segment(
         sink.set_volume(volume);
         sink.append(segment);
 
+        manage_active_sinks(sinks, MAX_VOICES);
+        sinks.push(sink);
+    }
+}
+
+fn play_full_buffer(
+    stream_handle: &OutputStreamHandle,
+    audio: &DecodedAudio,
+    volume: f32,
+    sinks: &mut Vec<Sink>
+) {
+    let (samples_arc, channels, sample_rate) = audio;
+    let samples: &Vec<f32> = samples_arc.as_ref();
+    if samples.is_empty() {
+        return;
+    }
+    let segment = SamplesBuffer::new(*channels, *sample_rate, samples.clone());
+    if let Ok(sink) = Sink::try_new(stream_handle) {
+        sink.set_volume(volume);
+        sink.append(segment);
         manage_active_sinks(sinks, MAX_VOICES);
         sinks.push(sink);
     }

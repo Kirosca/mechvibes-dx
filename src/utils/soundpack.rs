@@ -26,86 +26,13 @@ pub fn load_soundpack_metadata(soundpack_id: &str) -> Result<SoundpackMetadata, 
         _ => None,
     };
 
-    // If it's a V1 config that can be converted, auto-convert it
-    if
-        validation_result.status == SoundpackValidationStatus::VersionOneNeedsConversion &&
-        validation_result.can_be_converted
-    {
-        // Back up the original config before converting in place. The
-        // conversion overwrites `config_path` itself, so without this backup a
-        // failure part-way through leaves the pack with neither the original
-        // nor a working config. A backup that cannot be written means the
-        // conversion is unrecoverable, so refuse to start it rather than
-        // convert without a safety net.
-        let backup_path = format!("{}.v1.backup", config_path);
-        if let Err(e) = fs::copy(&config_path, &backup_path) {
-            return Err(
-                format!(
-                    "Refusing to convert {}: could not back up its config to {}: {}",
-                    soundpack_id,
-                    backup_path,
-                    e
-                )
-            );
-        }
-
-        // The folder is the only thing that says whether this is a mouse pack:
-        // V1 mouse packs were made in the keyboard editor and their configs
-        // are indistinguishable from keyboard ones.
-        let is_mouse_pack =
-            soundpack_id.starts_with("mouse/") || soundpack_id.starts_with("mouse\\");
-
-        // Convert V1 to V2
-        match config_converter::convert_v1_to_v2(&config_path, &config_path, None, is_mouse_pack) {
-            Ok(()) => {
-                // Successfully converted
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to convert {} from V1 to V2: {}", soundpack_id, e);
-                // Restore backup if conversion failed
-                if fs::copy(&backup_path, &config_path).is_ok() {
-                    // Restored backup
-                }
-                // Return error for conversion failure
-                return Err(error_msg);
-            }
-        }
-    }
     let content = fs
         ::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
 
-    let mut config: serde_json::Value = serde_json
+    let config: serde_json::Value = serde_json
         ::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {}", e))?;
-
-    // Check if this is V2 config with multi method and convert to single method
-    if let Some(definition_method) = config.get("definition_method").and_then(|v| v.as_str()) {
-        if definition_method == "multi" {
-            crate::always_print!("🔄 [CACHE DEBUG] Found V2 multi method config, converting to single method");
-            let soundpack_dir = paths::soundpacks::soundpack_dir(soundpack_id);
-
-            if
-                let Err(e) = config_converter::convert_v2_multi_to_single(
-                    &config_path,
-                    &soundpack_dir
-                )
-            {
-                crate::always_print!("❌ [CACHE DEBUG] Failed to convert multi to single: {}", e);
-                return Err(format!("Failed to convert multi to single method: {}", e));
-            }
-
-            // Re-read the converted config
-            let new_content = fs
-                ::read_to_string(&config_path)
-                .map_err(|e| format!("Failed to re-read converted config: {}", e))?;
-            config = serde_json
-                ::from_str(&new_content)
-                .map_err(|e| format!("Failed to parse converted config: {}", e))?;
-
-            crate::always_print!("✅ [CACHE DEBUG] Successfully converted to single method");
-        }
-    }
 
     // Debug: Check if config has audio_file field
     let audio_file = config.get("audio_file").and_then(|v| v.as_str());

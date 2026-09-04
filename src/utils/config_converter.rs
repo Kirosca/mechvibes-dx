@@ -1006,7 +1006,7 @@ fn save_audio_file(
 ///
 /// A leading zero only means this for a multi-character key, so `"0"` itself
 /// and ordinary codes like `"10"` are read normally.
-fn iohook_code_and_press(define_key: &str) -> Option<(u32, bool)> {
+pub fn iohook_code_and_press(define_key: &str) -> Option<(u32, bool)> {
     let clean = define_key
         .trim_start_matches("keycode-")
         .trim_start_matches("key_")
@@ -1016,7 +1016,7 @@ fn iohook_code_and_press(define_key: &str) -> Option<(u32, bool)> {
     Some((code, is_press))
 }
 
-fn create_iohook_to_mouse_button_mapping() -> HashMap<u32, String> {
+pub fn create_iohook_to_mouse_button_mapping() -> HashMap<u32, String> {
     let mut mapping = HashMap::new();
     mapping.insert(1, "MouseLeft".to_string());
     mapping.insert(2, "MouseRight".to_string());
@@ -1024,7 +1024,7 @@ fn create_iohook_to_mouse_button_mapping() -> HashMap<u32, String> {
     mapping
 }
 
-fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
+pub fn create_iohook_to_web_key_mapping() -> HashMap<u32, String> {
     let mut mapping = HashMap::new();
 
     // Basic keys (VC_* constants from IOHook)

@@ -123,20 +123,15 @@ pub fn validate_soundpack_config(config_path: &str) -> SoundpackValidationResult
     } else if config_version == Some(2) {
         // Explicitly marked as V2, validate V2 structure
         validate_v2_structure(&config, config_version, package_version)
-    } else if config_version == Some(1) || (has_defines && has_sound_field && !has_defs) {
-        // Explicitly V1 or has V1 structure (defines + sound + no defs)
+    } else if config_version == Some(1) || (has_defines && !has_defs) {
+        // Explicitly V1 or has V1 structure (defines + no defs) - natively supported!
         SoundpackValidationResult {
-            status: SoundpackValidationStatus::VersionOneNeedsConversion,
+            status: SoundpackValidationStatus::Valid,
             config_version: Some(1),
             detected_version: package_version,
-            is_valid_v2: false,
-            can_be_converted: true,
-            message: if has_method_field {
-                "Version 1 soundpack with method field detected, needs conversion to V2 format"
-                    .to_string()
-            } else {
-                "Version 1 soundpack detected, needs conversion to V2 format".to_string()
-            },
+            is_valid_v2: true,
+            can_be_converted: false,
+            message: "Valid V1 soundpack configuration".to_string(),
         }
     } else if has_defs && has_author {
         // Looks like V2 but no explicit version
@@ -554,9 +549,9 @@ mod tests {
         assert!(!result.can_be_converted, "converting a format we cannot read would corrupt it");
     }
 
-    /// V1 packs must keep taking the conversion path untouched.
+    /// V1 packs validate natively without conversion.
     #[test]
-    fn a_v1_pack_still_asks_to_be_converted() {
+    fn a_v1_pack_validates_natively() {
         let result = validate_json(
             r#"{
                 "config_version": 1,
@@ -566,19 +561,21 @@ mod tests {
             }"#
         );
 
-        assert_eq!(result.status, SoundpackValidationStatus::VersionOneNeedsConversion);
-        assert!(result.can_be_converted);
+        assert_eq!(result.status, SoundpackValidationStatus::Valid);
+        assert!(result.is_valid_v2);
+        assert!(!result.can_be_converted);
     }
 
-    /// An unversioned V1 pack is recognised by its shape alone.
+    /// An unversioned V1 pack is recognised by its shape alone and validates natively.
     #[test]
     fn an_unversioned_v1_pack_is_detected_by_structure() {
         let result = validate_json(
             r#"{ "name": "old", "defines": { "1": [0, 100] }, "sound": "sound.ogg" }"#
         );
 
-        assert_eq!(result.status, SoundpackValidationStatus::VersionOneNeedsConversion);
-        assert!(result.can_be_converted);
+        assert_eq!(result.status, SoundpackValidationStatus::Valid);
+        assert!(result.is_valid_v2);
+        assert!(!result.can_be_converted);
     }
 
     /// A config that is neither shape still reports what it is missing, and

@@ -1,6 +1,6 @@
 use crate::state::paths;
-use crate::state::soundpack::SoundPack;
 use crate::state::soundpack::{ SoundpackCache, SoundpackMetadata };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::audio_context::AudioContext;
@@ -42,9 +42,6 @@ pub fn load_keyboard_soundpack_with_cache_control(
     soundpack_id: &str,
     update_cache_on_error: bool
 ) -> Result<(), String> {
-    // An empty id means the config has no pack for this slot - a hand-edited
-    // or freshly created config, not an error. Nothing to load, and nothing is
-    // loaded yet either, so leave the engine alone and let the user pick.
     if soundpack_id.is_empty() {
         crate::always_print!("🎹 No keyboard soundpack selected");
         return Ok(());
@@ -69,7 +66,6 @@ pub fn load_mouse_soundpack_with_cache_control(
     soundpack_id: &str,
     update_cache_on_error: bool
 ) -> Result<(), String> {
-    // See the keyboard loader: an empty slot is tolerated, not unloaded.
     if soundpack_id.is_empty() {
         crate::always_print!("🖱️ No mouse soundpack selected");
         return Ok(());
@@ -84,37 +80,19 @@ pub fn load_mouse_soundpack_with_cache_control(
 }
 
 /// (samples, channels, sample_rate) for a decoded/resampled audio buffer.
-type DecodedAudio = (Vec<f32>, u16, u32);
+type DecodedAudio = (Arc<Vec<f32>>, u16, u32);
 
-/// Loads and decodes a soundpack's audio file, then resamples it to
-/// `device_rate` if given. Returns `(original, resampled)`; `original` keeps
-/// the file's native rate so a later device switch can re-resample without
-/// re-reading from disk.
-///
-/// `device_rate` is passed in by the caller (from `AudioContext`'s cached
-/// rate) rather than probed here - probing the device on every soundpack
-/// load can briefly interrupt other audio on Linux/ALSA (see the
-/// enumeration-avoidance note in `ui.rs`). `None` (rate unknown, or probe
-/// failed at startup) means skip resampling and keep the file's native rate,
-/// same as pre-resample baseline behavior - guessing a rate would risk
-/// resampling twice (once here, once again by rodio realtime).
-fn load_audio_file(
-    soundpack_path: &str,
-    soundpack: &SoundPack,
+/// Loads and decodes an audio file from path, resampling if needed.
+fn load_audio_file_from_path(
+    file_path: &str,
     device_rate: Option<u32>
 ) -> Result<(DecodedAudio, DecodedAudio), String> {
-    let sound_file_path = soundpack.audio_file
-        .as_ref()
-        .map(|src| format!("{}/{}", soundpack_path, src.trim_start_matches("./")))
-        .ok_or_else(|| "No audio_file field in soundpack config".to_string())?;
-
-    if !std::path::Path::new(&sound_file_path).exists() {
-        return Err(format!("Sound file not found: {}", sound_file_path));
+    if !std::path::Path::new(file_path).exists() {
+        return Err(format!("Sound file not found: {}", file_path));
     }
 
-    // Use Symphonia for audio loading instead of Rodio
-    let (samples, channels, file_rate) = load_audio_with_symphonia(&sound_file_path).map_err(
-        |e| format!("Failed to load audio: {}", e)
+    let (samples, channels, file_rate) = load_audio_with_symphonia(file_path).map_err(
+        |e| format!("Failed to load audio '{}': {}", file_path, e)
     )?;
 
     match device_rate {
@@ -132,18 +110,33 @@ fn load_audio_file(
                 device_rate,
                 start.elapsed().as_secs_f64() * 1000.0
             );
-            let original = (samples, channels, file_rate);
-            Ok((original, (resampled, channels, device_rate)))
+            let original = (Arc::new(samples), channels, file_rate);
+            let resampled_audio = (Arc::new(resampled), channels, device_rate);
+            Ok((original, resampled_audio))
         }
         _ => {
-            // Either the device rate matches the file rate, or it's unknown
-            // (probe failed) - either way, skip resampling and reuse the
-            // same buffer for original/resampled (no need to clone: both
-            // tuples describe identical audio at the file's native rate).
-            let decoded = (samples, channels, file_rate);
+            let samples_arc = Arc::new(samples);
+            let decoded = (samples_arc.clone(), channels, file_rate);
             Ok((decoded.clone(), decoded))
         }
     }
+}
+
+fn find_audio_file_in_dir(dir: &str) -> Option<String> {
+    let audio_extensions = ["ogg", "mp3", "wav", "flac"];
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if let Some(filename) = entry.file_name().to_str() {
+                let filename_lower = filename.to_lowercase();
+                for ext in &audio_extensions {
+                    if filename_lower.ends_with(&format!(".{}", ext)) {
+                        return Some(entry.path().to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Load audio file using Symphonia for consistent duration detection
@@ -490,21 +483,11 @@ fn relative_soundpack_id(soundpack_path: &str, roots: &[String]) -> String {
 
 fn create_soundpack_metadata(
     soundpack_path: &str,
-    soundpack: &SoundPack
+    config: &serde_json::Value,
+    soundpack_id: &str
 ) -> Result<SoundpackMetadata, String> {
-    // Extract the soundpack ID from the full path
-    // e.g., "/path/to/soundpacks/keyboard/Apex by teia" -> "keyboard/Apex by teia"
-    //
-    // Both roots have to be tried. Packs live under either the bundled
-    // directory or the custom one in app data, and the id has to come out as
-    // `type/name` for either: the scanner keys the cache that way, so an id
-    // that loses its `keyboard/` prefix here inserts a second entry for a pack
-    // already in the cache and the UI lists it twice. That is why only
-    // imported packs duplicated - bundled ones matched the first root and
-    // never reached the fallback.
     let id = soundpack_id_from_path(soundpack_path);
 
-    // Get file metadata
     let last_modified = match std::fs::metadata(soundpack_path) {
         Ok(metadata) =>
             metadata
@@ -516,74 +499,72 @@ fn create_soundpack_metadata(
         Err(_) => 0,
     };
 
+    let name = config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(soundpack_id)
+        .to_string();
+
+    let version = config
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0")
+        .to_string();
+
+    let tags = config
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(SoundpackMetadata {
-        id: id.clone(), // Use calculated relative path ID instead of config ID
-        name: soundpack.name.clone(),
-        author: soundpack.author.clone(),
-        description: soundpack.description.clone(),
-        version: soundpack.version.clone().unwrap_or_else(|| "1.0".to_string()),
-        tags: soundpack.tags.clone().unwrap_or_default(),
+        id: id.clone(),
+        name,
+        author: config
+            .get("author")
+            .or_else(|| config.get("m_author"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        description: config
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        version,
+        tags,
         icon: {
-            // Generate dynamic URL for icon instead of base64 conversion
-            if let Some(icon_filename) = &soundpack.icon {
+            if let Some(icon_filename) = config.get("icon").and_then(|v| v.as_str()) {
                 let icon_path = format!("{}/{}", soundpack_path, icon_filename);
                 if std::path::Path::new(&icon_path).exists() {
-                    // Create dynamic URL that will be served by the asset handler
                     Some(format!("/soundpack-images/{}/{}", id, icon_filename))
                 } else {
-                    Some(String::new()) // Empty string if icon file not found
+                    Some(String::new())
                 }
             } else {
-                Some(String::new()) // Empty string if no icon specified
+                Some(String::new())
             }
         },
-        soundpack_type: soundpack.soundpack_type.clone(), // Include the mouse field
-        folder_path: id, // Use the derived folder path for loading
+        soundpack_type: determine_soundpack_type(soundpack_id),
+        folder_path: id,
         last_modified,
         last_accessed: std::time::SystemTime
             ::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs(), // Add validation fields with default values
-        config_version: Some(soundpack.config_version_num),
-        is_valid_v2: true, // Assume valid since it loaded successfully
+            .as_secs(),
+        config_version: Some(2),
+        is_valid_v2: true,
         validation_status: "valid".to_string(),
         can_be_converted: false,
-        // Error tracking - None since we successfully created metadata
         last_error: None,
     })
 }
 
-fn create_key_mappings(
-    soundpack: &SoundPack,
-    _samples: &[f32]
-) -> std::collections::HashMap<String, Vec<(f64, f64)>> {
-    let mut key_mappings = std::collections::HashMap::new(); // For keyboard soundpacks, use the definitions field for keyboard mappings
-    // For mouse soundpacks, return empty key mappings
-    if soundpack.soundpack_type == crate::state::soundpack::SoundpackType::Keyboard {
-        for (key, key_def) in &soundpack.definitions {
-            // Convert KeyDefinition timing to Vec<(f64, f64)>
-            let converted_mappings: Vec<(f64, f64)> = key_def.timing
-                .iter()
-                .map(|pair| (pair[0] as f64, pair[1] as f64))
-                .collect();
-            key_mappings.insert(key.clone(), converted_mappings);
-        }
-    }
-
-    key_mappings
-}
-
 /// Translates a mouse pack's definition key into the button code the runtime
 /// actually emits.
-///
-/// V2 packs name their buttons directly (`MouseLeft`) and pass through
-/// untouched. The keyboard names are what Mechvibes V1 mouse packs carry: they
-/// were authored in the keyboard editor against iohook codes 1/2/3, which the
-/// V1 converter read through its keyboard table into `Escape`/`Digit1`/
-/// `Digit2`. The converter no longer does that, but packs converted by an
-/// earlier build are already on disk with those keys, so they are accepted
-/// here rather than left permanently silent.
 fn mouse_button_for_definition(definition: &str) -> &str {
     match definition {
         "Escape" => "MouseLeft",
@@ -591,57 +572,6 @@ fn mouse_button_for_definition(definition: &str) -> &str {
         "Digit2" => "MouseMiddle",
         other => other,
     }
-}
-
-fn create_mouse_mappings(
-    soundpack: &SoundPack,
-    _samples: &[f32]
-) -> std::collections::HashMap<String, Vec<(f64, f64)>> {
-    let mut mouse_mappings = std::collections::HashMap::new(); // For mouse soundpacks, use the definitions field directly
-    if soundpack.soundpack_type == crate::state::soundpack::SoundpackType::Mouse {
-        // This is a mouse soundpack, use definitions field for mouse mappings
-        for (button, key_def) in &soundpack.definitions {
-            // Convert KeyDefinition timing to Vec<(f64, f64)>
-            let converted_mappings: Vec<(f64, f64)> = key_def.timing
-                .iter()
-                .map(|pair| (pair[0] as f64, pair[1] as f64))
-                .collect();
-            mouse_mappings.insert(
-                mouse_button_for_definition(button).to_string(),
-                converted_mappings
-            );
-        }
-    } else {
-        // This is a keyboard soundpack, create default mouse mappings from keyboard sounds
-        crate::always_print!(
-            "🖱️ No mouse definitions found, creating default mouse mappings from keyboard sounds"
-        );
-
-        // Use common keyboard keys as fallback for mouse buttons
-        let fallback_mappings = [
-            ("MouseLeft", "Space"),
-            ("MouseRight", "Enter"),
-            ("MouseMiddle", "Tab"),
-            ("MouseWheelUp", "ArrowUp"),
-            ("MouseWheelDown", "ArrowDown"),
-            ("Mouse4", "Backspace"),
-            ("Mouse5", "Delete"),
-            ("Mouse6", "Home"),
-            ("Mouse7", "End"),
-            ("Mouse8", "PageUp"),
-        ];
-        for (mouse_button, keyboard_key) in &fallback_mappings {
-            if let Some(key_def) = soundpack.definitions.get(*keyboard_key) {
-                let converted_mappings: Vec<(f64, f64)> = key_def.timing
-                    .iter()
-                    .map(|pair| (pair[0] as f64, pair[1] as f64))
-                    .collect();
-                mouse_mappings.insert(mouse_button.to_string(), converted_mappings);
-            }
-        }
-    }
-
-    mouse_mappings
 }
 
 /// Loads a keyboard soundpack directly into engine-owned state (Phase 3).
@@ -677,36 +607,175 @@ fn load_keyboard_pack_into_engine_inner(
     let config_content = std::fs
         ::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
-    let mut soundpack: SoundPack = serde_json
+    let config: serde_json::Value = serde_json
         ::from_str(&config_content)
-        .map_err(|e| format!("Failed to parse V2 soundpack config: {}", e))?;
-    soundpack.soundpack_type = determine_soundpack_type(soundpack_id);
+        .map_err(|e| format!("Failed to parse soundpack config: {}", e))?;
 
-    if soundpack.soundpack_type != crate::state::soundpack::SoundpackType::Keyboard {
+    let soundpack_type = determine_soundpack_type(soundpack_id);
+    if soundpack_type != crate::state::soundpack::SoundpackType::Keyboard {
         return Err("This is a mouse soundpack, not a keyboard soundpack".to_string());
     }
 
-    let (original, resampled) = load_audio_file(&soundpack_path, &soundpack, state.device_rate)?;
-    let key_mappings = create_key_mappings(&soundpack, &resampled.0);
-
-    let (audio_samples, channels, sample_rate) = resampled;
-    state.keyboard_samples = Some((Arc::new(audio_samples), channels, sample_rate));
-    let (orig_samples, orig_channels, orig_rate) = original;
-    state.keyboard_samples_original = Some((Arc::new(orig_samples), orig_channels, orig_rate));
-
+    state.keyboard_samples = None;
+    state.keyboard_samples_original = None;
     state.key_map.clear();
-    for (key, mappings) in key_mappings {
-        let converted: Vec<[f32; 2]> = mappings
-            .into_iter()
-            .map(|(start, end)| [start as f32, end as f32])
-            .collect();
-        state.key_map.insert(key, converted);
-    }
+    state.keyboard_multi_samples.clear();
+    state.keyboard_multi_samples_original.clear();
     state.key_sinks.clear();
 
-    update_soundpack_cache(&soundpack_path, &soundpack, soundpack_id);
-    crate::always_print!("✅ [Engine] Loaded keyboard soundpack: {}", soundpack.name);
-    Ok(soundpack.name)
+    let name = config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(soundpack_id)
+        .to_string();
+
+    let mut file_cache: HashMap<String, (DecodedAudio, DecodedAudio)> = HashMap::new();
+    let mut get_or_load_file = |rel_path: &str| -> Result<(DecodedAudio, DecodedAudio), String> {
+        let full_path = format!("{}/{}", soundpack_path, rel_path.trim_start_matches("./"));
+        if let Some(cached) = file_cache.get(&full_path) {
+            return Ok(cached.clone());
+        }
+        let loaded = load_audio_file_from_path(&full_path, state.device_rate)?;
+        file_cache.insert(full_path, loaded.clone());
+        Ok(loaded)
+    };
+
+    let definitions = config.get("definitions").or_else(|| config.get("defs"));
+    let defines = config.get("defines");
+    let is_multi_method = config.get("definition_method").and_then(|v| v.as_str()) == Some("multi")
+        || config.get("key_define_type").and_then(|v| v.as_str()) == Some("multi");
+
+    if let Some(defs) = definitions.and_then(|d| d.as_object()) {
+        let has_audio_file_in_defs = is_multi_method || defs.values().any(|v| {
+            v.get("sound").is_some() || v.get("sounds").is_some() || v.get("audio_file").is_some()
+        });
+
+        if has_audio_file_in_defs {
+            for (key_name, val) in defs {
+                let mut filenames = Vec::new();
+                if let Some(sound) = val.get("sound").and_then(|v| v.as_str()) {
+                    filenames.push(sound.to_string());
+                } else if let Some(audio_file) = val.get("audio_file").and_then(|v| v.as_str()) {
+                    filenames.push(audio_file.to_string());
+                } else if let Some(sounds) = val.get("sounds").and_then(|v| v.as_array()) {
+                    for s in sounds {
+                        if let Some(str_val) = s.as_str() {
+                            filenames.push(str_val.to_string());
+                        }
+                    }
+                }
+                for filename in filenames {
+                    if let Ok((orig, resampled)) = get_or_load_file(&filename) {
+                        state.keyboard_multi_samples.entry(key_name.clone()).or_default().push(resampled);
+                        state.keyboard_multi_samples_original.entry(key_name.clone()).or_default().push(orig);
+                    }
+                }
+            }
+        } else {
+            let main_audio = config
+                .get("audio_file")
+                .or_else(|| config.get("sound"))
+                .and_then(|v| v.as_str());
+            let main_audio_path = if let Some(audio) = main_audio {
+                format!("{}/{}", soundpack_path, audio.trim_start_matches("./"))
+            } else {
+                find_audio_file_in_dir(&soundpack_path).ok_or("No audio file found in soundpack")?
+            };
+
+            let (original, resampled) = load_audio_file_from_path(&main_audio_path, state.device_rate)?;
+            state.keyboard_samples = Some(resampled);
+            state.keyboard_samples_original = Some(original);
+
+            for (key, val) in defs {
+                let timings = match val.get("timing") {
+                    Some(timing) => timing,
+                    None => val,
+                };
+                if let Some(arr) = timings.as_array() {
+                    for timing in arr {
+                        if let Some(timing_arr) = timing.as_array() {
+                            if timing_arr.len() >= 2 {
+                                let start = timing_arr[0].as_f64().unwrap_or(0.0) as f32;
+                                let end = timing_arr[1].as_f64().unwrap_or(100.0) as f32;
+                                state.key_map.entry(key.clone()).or_default().push([start, end]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if let Some(defs) = defines.and_then(|d| d.as_object()) {
+        let iohook_mapping = crate::utils::config_converter::create_iohook_to_web_key_mapping();
+        let is_multi_files = is_multi_method || defs.values().any(|v| {
+            v.is_string()
+                || (v.is_array()
+                    && v.as_array().map_or(false, |a| {
+                        a.first().map_or(false, |first| first.is_string())
+                    }))
+        });
+
+        if is_multi_files {
+            for (code_str, val) in defs {
+                if let Some((iohook_num, _)) = crate::utils::config_converter::iohook_code_and_press(code_str) {
+                    if let Some(key_name) = iohook_mapping.get(&iohook_num) {
+                        let mut filenames = Vec::new();
+                        if let Some(s) = val.as_str() {
+                            if !s.is_empty() && s != "null" {
+                                filenames.push(s.to_string());
+                            }
+                        } else if let Some(arr) = val.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    if !s.is_empty() && s != "null" {
+                                        filenames.push(s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        for filename in filenames {
+                            if let Ok((orig, resampled)) = get_or_load_file(&filename) {
+                                state.keyboard_multi_samples.entry(key_name.clone()).or_default().push(resampled);
+                                state.keyboard_multi_samples_original.entry(key_name.clone()).or_default().push(orig);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let main_audio = config
+                .get("sound")
+                .or_else(|| config.get("audio_file"))
+                .and_then(|v| v.as_str());
+            let main_audio_path = if let Some(audio) = main_audio {
+                format!("{}/{}", soundpack_path, audio.trim_start_matches("./"))
+            } else {
+                find_audio_file_in_dir(&soundpack_path).ok_or("No audio file found in soundpack")?
+            };
+
+            let (original, resampled) = load_audio_file_from_path(&main_audio_path, state.device_rate)?;
+            state.keyboard_samples = Some(resampled);
+            state.keyboard_samples_original = Some(original);
+
+            for (code_str, val) in defs {
+                if let Some((iohook_num, _)) = crate::utils::config_converter::iohook_code_and_press(code_str) {
+                    if let Some(key_name) = iohook_mapping.get(&iohook_num) {
+                        if let Some(arr) = val.as_array() {
+                            if arr.len() >= 2 {
+                                let start = arr[0].as_f64().unwrap_or(0.0) as f32;
+                                let dur = arr[1].as_f64().unwrap_or(100.0) as f32;
+                                let end = start + dur;
+                                state.key_map.entry(key_name.clone()).or_default().push([start, end]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    update_soundpack_cache(&soundpack_path, &config, soundpack_id);
+    crate::always_print!("✅ [Engine] Loaded keyboard soundpack: {}", name);
+    Ok(name)
 }
 
 /// Loads a mouse soundpack directly into engine-owned state (Phase 3).
@@ -740,44 +809,183 @@ fn load_mouse_pack_into_engine_inner(
     let config_content = std::fs
         ::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
-    let mut soundpack: SoundPack = serde_json
+    let config: serde_json::Value = serde_json
         ::from_str(&config_content)
         .map_err(|e| format!("Failed to parse config: {}", e))?;
-    soundpack.soundpack_type = determine_soundpack_type(soundpack_id);
 
-    if soundpack.soundpack_type != crate::state::soundpack::SoundpackType::Mouse {
+    let soundpack_type = determine_soundpack_type(soundpack_id);
+    if soundpack_type != crate::state::soundpack::SoundpackType::Mouse {
         return Err("This is a keyboard soundpack, not a mouse soundpack".to_string());
     }
 
-    let (original, resampled) = load_audio_file(&soundpack_path, &soundpack, state.device_rate)?;
-    let mouse_mappings = create_mouse_mappings(&soundpack, &resampled.0);
-
-    let (audio_samples, channels, sample_rate) = resampled;
-    state.mouse_samples = Some((Arc::new(audio_samples), channels, sample_rate));
-    let (orig_samples, orig_channels, orig_rate) = original;
-    state.mouse_samples_original = Some((Arc::new(orig_samples), orig_channels, orig_rate));
-
+    state.mouse_samples = None;
+    state.mouse_samples_original = None;
     state.mouse_map.clear();
-    for (button, mappings) in mouse_mappings {
-        let converted: Vec<[f32; 2]> = mappings
-            .into_iter()
-            .map(|(start, end)| [start as f32, end as f32])
-            .collect();
-        state.mouse_map.insert(button, converted);
-    }
+    state.mouse_multi_samples.clear();
+    state.mouse_multi_samples_original.clear();
     state.mouse_sinks.clear();
 
-    update_soundpack_cache(&soundpack_path, &soundpack, soundpack_id);
-    crate::always_print!("✅ [Engine] Loaded mouse soundpack: {}", soundpack.name);
-    Ok(soundpack.name)
+    let name = config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(soundpack_id)
+        .to_string();
+
+    let mut file_cache: HashMap<String, (DecodedAudio, DecodedAudio)> = HashMap::new();
+    let mut get_or_load_file = |rel_path: &str| -> Result<(DecodedAudio, DecodedAudio), String> {
+        let full_path = format!("{}/{}", soundpack_path, rel_path.trim_start_matches("./"));
+        if let Some(cached) = file_cache.get(&full_path) {
+            return Ok(cached.clone());
+        }
+        let loaded = load_audio_file_from_path(&full_path, state.device_rate)?;
+        file_cache.insert(full_path, loaded.clone());
+        Ok(loaded)
+    };
+
+    let definitions = config.get("definitions").or_else(|| config.get("defs"));
+    let defines = config.get("defines");
+    let is_multi_method = config.get("definition_method").and_then(|v| v.as_str()) == Some("multi")
+        || config.get("key_define_type").and_then(|v| v.as_str()) == Some("multi");
+
+    if let Some(defs) = definitions.and_then(|d| d.as_object()) {
+        let has_audio_file_in_defs = is_multi_method || defs.values().any(|v| {
+            v.get("sound").is_some() || v.get("sounds").is_some() || v.get("audio_file").is_some()
+        });
+
+        if has_audio_file_in_defs {
+            for (key_name, val) in defs {
+                let mapped_key = mouse_button_for_definition(key_name);
+                let mut filenames = Vec::new();
+                if let Some(sound) = val.get("sound").and_then(|v| v.as_str()) {
+                    filenames.push(sound.to_string());
+                } else if let Some(audio_file) = val.get("audio_file").and_then(|v| v.as_str()) {
+                    filenames.push(audio_file.to_string());
+                } else if let Some(sounds) = val.get("sounds").and_then(|v| v.as_array()) {
+                    for s in sounds {
+                        if let Some(str_val) = s.as_str() {
+                            filenames.push(str_val.to_string());
+                        }
+                    }
+                }
+                for filename in filenames {
+                    if let Ok((orig, resampled)) = get_or_load_file(&filename) {
+                        state.mouse_multi_samples.entry(mapped_key.to_string()).or_default().push(resampled);
+                        state.mouse_multi_samples_original.entry(mapped_key.to_string()).or_default().push(orig);
+                    }
+                }
+            }
+        } else {
+            let main_audio = config
+                .get("audio_file")
+                .or_else(|| config.get("sound"))
+                .and_then(|v| v.as_str());
+            let main_audio_path = if let Some(audio) = main_audio {
+                format!("{}/{}", soundpack_path, audio.trim_start_matches("./"))
+            } else {
+                find_audio_file_in_dir(&soundpack_path).ok_or("No audio file found in soundpack")?
+            };
+
+            let (original, resampled) = load_audio_file_from_path(&main_audio_path, state.device_rate)?;
+            state.mouse_samples = Some(resampled);
+            state.mouse_samples_original = Some(original);
+
+            for (key, val) in defs {
+                let mapped_key = mouse_button_for_definition(key);
+                let timings = match val.get("timing") {
+                    Some(timing) => timing,
+                    None => val,
+                };
+                if let Some(arr) = timings.as_array() {
+                    for timing in arr {
+                        if let Some(timing_arr) = timing.as_array() {
+                            if timing_arr.len() >= 2 {
+                                let start = timing_arr[0].as_f64().unwrap_or(0.0) as f32;
+                                let end = timing_arr[1].as_f64().unwrap_or(100.0) as f32;
+                                state.mouse_map.entry(mapped_key.to_string()).or_default().push([start, end]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if let Some(defs) = defines.and_then(|d| d.as_object()) {
+        let iohook_mapping = crate::utils::config_converter::create_iohook_to_mouse_button_mapping();
+        let is_multi_files = is_multi_method || defs.values().any(|v| {
+            v.is_string()
+                || (v.is_array()
+                    && v.as_array().map_or(false, |a| {
+                        a.first().map_or(false, |first| first.is_string())
+                    }))
+        });
+
+        if is_multi_files {
+            for (code_str, val) in defs {
+                if let Some((iohook_num, _)) = crate::utils::config_converter::iohook_code_and_press(code_str) {
+                    if let Some(key_name) = iohook_mapping.get(&iohook_num) {
+                        let mut filenames = Vec::new();
+                        if let Some(s) = val.as_str() {
+                            if !s.is_empty() && s != "null" {
+                                filenames.push(s.to_string());
+                            }
+                        } else if let Some(arr) = val.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    if !s.is_empty() && s != "null" {
+                                        filenames.push(s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        for filename in filenames {
+                            if let Ok((orig, resampled)) = get_or_load_file(&filename) {
+                                state.mouse_multi_samples.entry(key_name.clone()).or_default().push(resampled);
+                                state.mouse_multi_samples_original.entry(key_name.clone()).or_default().push(orig);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let main_audio = config
+                .get("sound")
+                .or_else(|| config.get("audio_file"))
+                .and_then(|v| v.as_str());
+            let main_audio_path = if let Some(audio) = main_audio {
+                format!("{}/{}", soundpack_path, audio.trim_start_matches("./"))
+            } else {
+                find_audio_file_in_dir(&soundpack_path).ok_or("No audio file found in soundpack")?
+            };
+
+            let (original, resampled) = load_audio_file_from_path(&main_audio_path, state.device_rate)?;
+            state.mouse_samples = Some(resampled);
+            state.mouse_samples_original = Some(original);
+
+            for (code_str, val) in defs {
+                if let Some((iohook_num, _)) = crate::utils::config_converter::iohook_code_and_press(code_str) {
+                    if let Some(key_name) = iohook_mapping.get(&iohook_num) {
+                        if let Some(arr) = val.as_array() {
+                            if arr.len() >= 2 {
+                                let start = arr[0].as_f64().unwrap_or(0.0) as f32;
+                                let dur = arr[1].as_f64().unwrap_or(100.0) as f32;
+                                let end = start + dur;
+                                state.mouse_map.entry(key_name.clone()).or_default().push([start, end]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    update_soundpack_cache(&soundpack_path, &config, soundpack_id);
+    crate::always_print!("✅ [Engine] Loaded mouse soundpack: {}", name);
+    Ok(name)
 }
 
-/// Shared metadata-cache update used by both engine loaders (extracted from
-/// the duplicated tail of `load_keyboard_soundpack_optimized`/
-/// `load_mouse_soundpack_optimized`).
-fn update_soundpack_cache(soundpack_path: &str, soundpack: &SoundPack, soundpack_id: &str) {
+/// Shared metadata-cache update used by both engine loaders.
+fn update_soundpack_cache(soundpack_path: &str, config: &serde_json::Value, soundpack_id: &str) {
     let mut cache = SoundpackCache::load();
-    match create_soundpack_metadata(soundpack_path, soundpack) {
+    match create_soundpack_metadata(soundpack_path, config, soundpack_id) {
         Ok(metadata) => {
             cache.add_soundpack(metadata);
         }
