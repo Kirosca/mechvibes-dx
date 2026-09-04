@@ -349,7 +349,7 @@ impl EngineState {
 
         let label = self.current_device_id.clone().unwrap_or_else(|| "System Default".to_string());
         Ok(label)
-    } }
+    }
 }
 
 /// Whether a keystroke should produce sound, given the global mute flag and
