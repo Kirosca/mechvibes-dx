@@ -6,13 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.8.2-v0.5] - 2026-09-04
+## [0.8.2-v0.6] - 2026-09-04
 
 ### Added / Changed
 
 - **Scheme B: Native Multi-Audio Direct In-Memory Loading & Zero Disk Mutation.** Legacy Mechvibes V1 soundpacks and separate audio files (`1.wav`, `2.wav`, etc.) are now read directly in-memory without modifying `config.json` on disk, creating `.v1.backup` files, or generating `concatenated_audio.wav`.
 - **Zero-truncation continuous audio playback for key combinations.** Keystroke combinations like `Win + Space` now play smoothly with full audio buffers and up to 64 concurrent voices, eliminating slice cutoffs and stutter.
-- **Fixed cross-platform compilation and cleaned warnings across Windows, macOS, and Linux.**
+- **Fixed Linux .deb filename discovery during CI release staging.**
 
 ## [0.8.2-v0.1] - 2026-09-04
 

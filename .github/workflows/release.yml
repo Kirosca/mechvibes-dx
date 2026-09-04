@@ -181,7 +181,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
 
-          DEB_SOURCE=$(ls target/debian/mechvibes-dx_"${VERSION}"*.deb | head -1)
+          DEB_SOURCE=$(ls target/debian/mechvibes-dx_*.deb | head -1)
           if [ ! -f "$DEB_SOURCE" ]; then
             echo "::error::No .deb produced for version ${VERSION} in target/debian/"
             exit 1
