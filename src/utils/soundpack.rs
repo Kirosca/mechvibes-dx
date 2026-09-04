@@ -1,6 +1,5 @@
 use crate::state::paths;
 use crate::state::soundpack::SoundpackMetadata;
-use crate::utils::config_converter;
 use crate::utils::soundpack_validator::{ validate_soundpack_config, SoundpackValidationStatus };
 use std::fs;
 

@@ -232,7 +232,7 @@ impl EngineState {
                     let audio = if audio_list.len() == 1 {
                         &audio_list[0]
                     } else {
-                        let idx = rand::random::<usize>() % audio_list.len();
+                        let idx = (rand::random::<u32>() as usize) % audio_list.len();
                         &audio_list[idx]
                     };
                     play_full_buffer(
@@ -271,7 +271,7 @@ impl EngineState {
                     let audio = if audio_list.len() == 1 {
                         &audio_list[0]
                     } else {
-                        let idx = rand::random::<usize>() % audio_list.len();
+                        let idx = (rand::random::<u32>() as usize) % audio_list.len();
                         &audio_list[idx]
                     };
                     play_full_buffer(

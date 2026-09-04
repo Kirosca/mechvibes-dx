@@ -99,8 +99,8 @@ pub fn validate_soundpack_config(config_path: &str) -> SoundpackValidationResult
 
     // Check for V1 indicators
     let has_defines = config.get("defines").is_some();
-    let has_sound_field = config.get("sound").is_some();
-    let has_method_field =
+    let _has_sound_field = config.get("sound").is_some();
+    let _has_method_field =
         config.get("method").is_some() || config.get("key_define_type").is_some();
 
     // Check for V2 indicators
