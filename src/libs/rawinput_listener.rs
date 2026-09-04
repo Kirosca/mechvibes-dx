@@ -45,7 +45,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if code == HC_ACTION {
-        let kbd = &*(lparam as *const KBDLLHOOKSTRUCT);
+        let kbd = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
         // LLKHF_INJECTED is 0x00000010 (filter synthetic software injections like IME rewrites)
         let is_injected = (kbd.flags & 0x10) != 0;
         if !is_injected {
@@ -81,7 +81,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
             }
         }
     }
-    CallNextHookEx(null_mut(), code, wparam, lparam)
+    unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
 }
 
 /// One captured input event, before it is turned into a wire line.

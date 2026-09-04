@@ -14,12 +14,16 @@ mod windows_impl {
     use winapi::ctypes::c_void;
     use winapi::shared::guiddef::{ GUID, IID };
     use winapi::shared::minwindef::{ DWORD, ULONG };
-    use winapi::shared::winerror::{ E_NOINTERFACE, HRESULT, S_OK };
     use winapi::shared::wtypes::PROPERTYKEY;
-    use winapi::um::combaseapi::{
-        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-    };
+    use winapi::um::combaseapi::{ CoCreateInstance, CoInitializeEx };
     use winapi::um::winnt::LPCWSTR;
+
+    type HRESULT = winapi::shared::minwindef::LONG;
+    const S_OK: HRESULT = 0;
+    const E_NOINTERFACE: HRESULT = 0x80004002u32 as HRESULT;
+    const E_POINTER: HRESULT = 0x80004003u32 as HRESULT;
+    const CLSCTX_INPROC_SERVER: DWORD = 1;
+    const COINITBASE_MULTITHREADED: DWORD = 0;
 
     const CLSID_MM_DEVICE_ENUMERATOR: GUID = GUID {
         Data1: 0xBCDE0395,
@@ -123,29 +127,33 @@ mod windows_impl {
         ppvObject: *mut *mut c_void,
     ) -> HRESULT {
         if ppvObject.is_null() {
-            return winapi::shared::winerror::E_POINTER;
+            return E_POINTER;
         }
         if riid.is_null() {
             return E_NOINTERFACE;
         }
 
-        let iid = &*riid;
+        let iid = unsafe { &*riid };
         if is_guid_equal(iid, &IID_I_UNKNOWN) || is_guid_equal(iid, &IID_IMM_NOTIFICATION_CLIENT) {
-            *ppvObject = this as *mut c_void;
-            AddRef(this);
+            unsafe {
+                *ppvObject = this as *mut c_void;
+                AddRef(this);
+            }
             S_OK
         } else {
-            *ppvObject = null_mut();
+            unsafe {
+                *ppvObject = null_mut();
+            }
             E_NOINTERFACE
         }
     }
 
     unsafe extern "system" fn AddRef(this: *mut IMMNotificationClient) -> ULONG {
-        (*this).ref_count.fetch_add(1, Ordering::SeqCst) + 1
+        unsafe { (*this).ref_count.fetch_add(1, Ordering::SeqCst) + 1 }
     }
 
     unsafe extern "system" fn Release(this: *mut IMMNotificationClient) -> ULONG {
-        let prev = (*this).ref_count.fetch_sub(1, Ordering::SeqCst);
+        let prev = unsafe { (*this).ref_count.fetch_sub(1, Ordering::SeqCst) };
         prev.saturating_sub(1)
     }
 
@@ -259,7 +267,7 @@ mod windows_impl {
     pub fn start() {
         std::thread::spawn(|| {
             unsafe {
-                let _ = CoInitializeEx(null_mut(), COINIT_MULTITHREADED);
+                let _ = CoInitializeEx(null_mut(), COINITBASE_MULTITHREADED);
 
                 let mut enumerator_ptr: *mut c_void = null_mut();
                 let hr = CoCreateInstance(

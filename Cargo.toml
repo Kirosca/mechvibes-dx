@@ -1,6 +1,6 @@
 [package]
 name = "mechvibes-dx"
-version = "0.8.2-v0.8"
+version = "0.8.2-v0.9"
 authors = ["Hải Nguyễn <hainguyen.ts13@gmail.com>"]
 edition = "2024"
 description = "A modern mechanical keyboard sound simulator with customizable soundpacks"
@@ -72,6 +72,7 @@ winapi = { version = "0.3", features = [
   "winbase",
   "combaseapi",
   "objbase",
+  "winerror",
 ] }
 
 
