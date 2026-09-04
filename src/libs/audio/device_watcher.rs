@@ -18,7 +18,7 @@ mod windows_impl {
     use winapi::um::combaseapi::{ CoCreateInstance, CoInitializeEx };
     use winapi::um::winnt::LPCWSTR;
 
-    type HRESULT = winapi::shared::minwindef::LONG;
+    type HRESULT = i32;
     const S_OK: HRESULT = 0;
     const E_NOINTERFACE: HRESULT = 0x80004002u32 as HRESULT;
     const E_POINTER: HRESULT = 0x80004003u32 as HRESULT;
