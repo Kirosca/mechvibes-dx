@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.2-v0.8] - 2026-09-04
+
+### Added / Changed
+
+- **Fixed audio output following system default device on connect / disconnect (Issue #83).** Implemented Windows Core Audio `IMMNotificationClient` endpoint watcher to listen for `OnDefaultDeviceChanged` and `OnDeviceStateChanged` events. When headphones or Bluetooth audio devices are plugged in, unplugged, or switched in the Windows tray, the audio engine and ambiance player automatically hot-reload the audio stream with zero polling and zero latency.
+
 ## [0.8.2-v0.7] - 2026-09-04
 
 ### Added / Changed

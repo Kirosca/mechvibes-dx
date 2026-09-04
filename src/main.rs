@@ -226,6 +226,7 @@ fn main() {
     // (OutputStream is not Send), and drives keyboard/mouse playback via a
     // blocking select!/recv() loop instead of the UI polling it every ~1ms.
     libs::audio::spawn_engine(keyboard_rx, mouse_rx, hotkey_rx);
+    libs::audio::start_device_watcher();
     debug_print!("🎧 Audio engine thread started");
 
     // Initialize window focus state

@@ -113,6 +113,7 @@ pub fn run(args: &CliArgs) {
     // Spawned before the listeners so no keystroke can arrive with nothing
     // to receive it. The engine loads the configured packs itself.
     let engine = crate::libs::audio::spawn_engine(keyboard_rx, mouse_rx, engine_hotkey_rx);
+    crate::libs::audio::start_device_watcher();
 
     let (keyboard_override, mouse_override) = soundpack_overrides(
         args,
