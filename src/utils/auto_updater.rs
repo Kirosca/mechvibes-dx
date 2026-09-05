@@ -965,7 +965,7 @@ mod tests {
     fn releases_page_url_points_at_the_tag() {
         assert_eq!(
             AutoUpdater::releases_page_url("0.7.0"),
-            "https://github.com/hainguyents13/mechvibes-dx/releases/tag/v0.7.0"
+            format!("https://github.com/{}/{}/releases/tag/v0.7.0", REPO_OWNER, REPO_NAME)
         );
     }
 
