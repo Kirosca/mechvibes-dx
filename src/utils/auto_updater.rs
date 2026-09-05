@@ -725,14 +725,19 @@ pub fn clear_stale_available_version() -> bool {
         return false;
     };
 
-    if is_upgrade(crate::utils::constants::APP_VERSION, &available_version) {
+    let current_cfg = crate::state::config_writer::current();
+    let url = current_cfg.auto_update.available_download_url.as_deref().unwrap_or_default();
+    let is_foreign_repo = !url.is_empty() && !url.contains(&format!("{}/{}", REPO_OWNER, REPO_NAME));
+
+    if !is_foreign_repo && is_upgrade(crate::utils::constants::APP_VERSION, &available_version) {
         return false;
     }
 
     crate::always_print!(
-        "🧹 Clearing stale update record: v{} is not newer than the running v{}",
+        "🧹 Clearing stale update record: v{} is not newer than the running v{} (foreign repo: {})",
         available_version,
-        crate::utils::constants::APP_VERSION
+        crate::utils::constants::APP_VERSION,
+        is_foreign_repo
     );
     crate::state::config_writer::apply(|config| {
         config.auto_update.available_version = None;
