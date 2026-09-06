@@ -103,9 +103,12 @@ pub fn start_evdev_keyboard_listener(
                                                 "KeyM" => {
                                                     // Check for Ctrl+Alt+M hotkey combination
                                                     if ctrl_pressed && alt_pressed {
-                                                        crate::always_print!("🔥 [evdev] Hotkey detected: Ctrl+Alt+M - Toggling global sound");
-                                                        let _ = hotkey_tx.send("TOGGLE_SOUND".to_string());
-                                                        continue; // Don't process this as a regular key event
+                                                        let config = crate::state::config_writer::current();
+                                                        if config.enable_mute_hotkey {
+                                                            crate::always_print!("🔥 [evdev] Hotkey detected: Ctrl+Alt+M - Toggling global sound");
+                                                            let _ = hotkey_tx.send("TOGGLE_SOUND".to_string());
+                                                            continue; // Don't process this as a regular key event
+                                                        }
                                                     }
                                                 }
                                                 _ => {}

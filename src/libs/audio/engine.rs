@@ -719,10 +719,13 @@ fn run_engine(
             recv(hotkey_rx) -> msg => {
                 if let Ok(command) = msg {
                     if command == "TOGGLE_SOUND" {
-                        // Adopt the persisted value rather than negating the
-                        // cached one, so the engine can't drift out of sync
-                        // with config if the two ever disagree.
-                        state.sound_enabled = handle_toggle_sound();
+                        let config = crate::state::config_writer::current();
+                        if config.enable_mute_hotkey {
+                            // Adopt the persisted value rather than negating the
+                            // cached one, so the engine can't drift out of sync
+                            // with config if the two ever disagree.
+                            state.sound_enabled = handle_toggle_sound();
+                        }
                     }
                 }
             }

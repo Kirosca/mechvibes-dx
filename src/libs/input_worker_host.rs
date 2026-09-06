@@ -310,8 +310,11 @@ fn pump_worker(
             // global mute toggle should work from any keyboard, even one the
             // user disabled for soundpack playback.
             if hotkey.observe(event.code, event.is_down) {
-                let _ = hotkey_tx.send("TOGGLE_SOUND".to_string());
-                continue;
+                let config = crate::state::config_writer::current();
+                if config.enable_mute_hotkey {
+                    let _ = hotkey_tx.send("TOGGLE_SOUND".to_string());
+                    continue;
+                }
             }
         }
 

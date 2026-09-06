@@ -143,6 +143,9 @@ pub struct AppConfig {
     /// would silently opt the user out on upgrade from a config predating it.
     #[serde(default = "default_true")]
     pub enable_telemetry: bool,
+    /// Enable/disable global mute hotkey (Ctrl + Alt + M). Default is true.
+    #[serde(default = "default_true")]
+    pub enable_mute_hotkey: bool,
 }
 
 /// serde default for opt-out booleans, which have no `#[derive(Default)]`
@@ -287,6 +290,7 @@ impl AppConfig {
             && self.landscape_mode == other.landscape_mode
             && self.auto_update == other.auto_update
             && self.enable_telemetry == other.enable_telemetry
+            && self.enable_mute_hotkey == other.enable_mute_hotkey
     }
 
     pub fn load() -> Self {
@@ -467,6 +471,7 @@ impl Default for AppConfig {
             landscape_mode: false, // Default landscape mode disabled
             auto_update: AutoUpdateConfig::default(), // Default auto-update settings
             enable_telemetry: true, // Opt-out: on by default, disclosed in README and Settings
+            enable_mute_hotkey: true, // Default global mute hotkey enabled
         }
     }
 }

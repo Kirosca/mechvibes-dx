@@ -23,6 +23,7 @@ pub fn SettingsPage() -> Element {
 
     // Use computed signals that always reflect current config state
     let enable_volume_boost = use_memo(move || config().enable_volume_boost);
+    let enable_mute_hotkey = use_memo(move || config().enable_mute_hotkey);
     let auto_start = use_memo(move || config().auto_start);
     let start_minimized = use_memo(move || config().start_minimized);
     let enable_telemetry = use_memo(move || config().enable_telemetry);
@@ -90,6 +91,25 @@ pub fn SettingsPage() -> Element {
                                           config.mouse_volume = 1.0;
                                       }
                                   }
+                              }),
+                          );
+                      }
+                  },
+                }
+                // Mute shortcut (Ctrl + Alt + M)
+                Toggler {
+                  title: "Mute shortcut (Ctrl + Alt + M)".to_string(),
+                  description: Some(
+                      "Toggle global sound on or off using the Ctrl + Alt + M keyboard shortcut."
+                          .to_string(),
+                  ),
+                  checked: enable_mute_hotkey(),
+                  on_change: {
+                      let update_config = update_config.clone();
+                      move |new_value: bool| {
+                          update_config(
+                              Box::new(move |config| {
+                                  config.enable_mute_hotkey = new_value;
                               }),
                           );
                       }
