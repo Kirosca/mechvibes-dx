@@ -35,20 +35,28 @@ jobs:
         id: version_gate
         shell: pwsh
         run: |
-          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          $refName = "${{ github.ref_name }}"
+          $refType = "${{ github.ref_type }}"
           $cargoToml = [IO.File]::ReadAllText("Cargo.toml", [Text.Encoding]::UTF8)
           if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
             Write-Error "Could not find version in Cargo.toml"
             exit 1
           }
           $cargoVersion = $Matches[1]
-          if ($tagVersion -ne $cargoVersion) {
-            Write-Error "Tag version ($tagVersion) does not match Cargo.toml version ($cargoVersion)"
-            exit 1
+          if ($refType -eq "tag") {
+            $tagVersion = $refName -replace '^v', ''
+            if ($tagVersion -ne $cargoVersion) {
+              Write-Error "Tag version ($tagVersion) does not match Cargo.toml version ($cargoVersion)"
+              exit 1
+            }
+            Write-Host "Tag version matches Cargo.toml version: $tagVersion"
+            $appVersion = $tagVersion
+          } else {
+            Write-Host "Workflow dispatched from branch ($refName), using Cargo.toml version: $cargoVersion"
+            $appVersion = $cargoVersion
           }
-          Write-Host "Tag version matches Cargo.toml version: $tagVersion"
-          "APP_VERSION=$tagVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "app_version=$tagVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "app_version=$appVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Gate - extract changelog notes
         shell: pwsh
@@ -178,7 +186,7 @@ jobs:
       - name: Stage Linux assets
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
           mkdir -p dist
 
           DEB_SOURCE=$(ls target/debian/mechvibes-dx_*.deb | head -1)
@@ -198,7 +206,7 @@ jobs:
       - name: Build AppImage
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
           chmod +x scripts/build-linux-appimage.sh
           ./scripts/build-linux-appimage.sh "$VERSION"
 
@@ -336,7 +344,7 @@ jobs:
       - name: Assemble .app and DMG
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
           chmod +x scripts/build-macos-app.sh
           ./scripts/build-macos-app.sh "$VERSION"
 
@@ -488,5 +496,6 @@ jobs:
           # Plain "vX.Y.Z" title by user preference (260803) - the repo name
           # already says what the project is.
           name: "v${{ needs.windows-build.outputs.app_version }}"
+          tag_name: "v${{ needs.windows-build.outputs.app_version }}"
           body_path: notes.md
           files: release/*
