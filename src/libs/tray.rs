@@ -24,6 +24,7 @@ pub enum TrayMessage {
     Show,
     Exit,
     ToggleMute,
+    ToggleMuteAmbiance,
     OpenGitHub,
     OpenDiscord,
     OpenWebsite,
