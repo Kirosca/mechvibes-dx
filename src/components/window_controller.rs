@@ -140,6 +140,29 @@ pub fn WindowController() -> Element {
                                 }
                             });
                         }
+                        TrayMessage::ToggleMuteAmbiance => {
+                            let mut is_muted = false;
+                            crate::state::ambiance::update_global_ambiance_player_state(|player| {
+                                player.toggle_mute();
+                                is_muted = player.is_muted;
+                            });
+                            update_config(
+                                Box::new(move |config| {
+                                    config.ambiance_is_muted = is_muted;
+                                })
+                            );
+                            debug_print!(
+                                "🔇 Ambiance sounds {} via tray menu",
+                                if is_muted { "muted" } else { "unmuted" }
+                            );
+                            tray_manager_clone.with_mut(|tray_opt| {
+                                if let Some(tray) = tray_opt {
+                                    if let Err(e) = tray.update_menu() {
+                                        always_eprint!("❌ Failed to update tray menu: {}", e);
+                                    }
+                                }
+                            });
+                        }
                         TrayMessage::OpenGitHub => {
                             let url = "https://github.com/Kirosca/mechvibes-dx";
                             if let Err(e) = open::that(url) {

@@ -372,6 +372,7 @@ impl AmbiancePlayerState {
             config.ambiance_is_muted = is_muted;
             // Don't save is_playing - always start paused
         });
+        crate::libs::tray_service::request_tray_update();
     }
 
     /// Get built-in ambiance sounds (using local assets)
@@ -516,6 +517,11 @@ impl AmbiancePlayerState {
     /// Toggle global mute
     pub fn toggle_mute(&mut self) {
         self.is_muted = !self.is_muted;
+
+        if !self.is_muted && !self.is_playing && !self.active_sounds.is_empty() {
+            self.is_playing = true;
+            self.start_all_active_sounds();
+        }
 
         // Update audio player mute state
         let _ = set_global_ambiance_mute(self.is_muted);

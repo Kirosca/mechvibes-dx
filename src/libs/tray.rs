@@ -101,6 +101,7 @@ pub struct TrayManager {
     /// between "Mute"/"Unmute"; holding the item lets the label stay fixed and
     /// the state show as a checkmark instead.
     mute_item: CheckMenuItem,
+    mute_ambiance_item: CheckMenuItem,
     icons: TrayIcons,
 }
 
@@ -111,6 +112,7 @@ impl TrayManager {
         // `enable_sound` is the positive flag, so muted is its inverse. The
         // menu item is checked when muted.
         let muted = !config.enable_sound;
+        let ambiance_muted = config.ambiance_is_muted;
 
         // Create the tray menu with specific IDs
         let show_item = MenuItem::with_id(
@@ -127,6 +129,13 @@ impl TrayManager {
             "Mute sounds",
             true,
             muted,
+            None
+        );
+        let mute_ambiance_item = CheckMenuItem::with_id(
+            MenuId::new("toggle_mute_ambiance"),
+            "Mute ambiance sounds",
+            true,
+            ambiance_muted,
             None
         );
         let separator2 = PredefinedMenuItem::separator();
@@ -155,6 +164,7 @@ impl TrayManager {
                 &show_item,
                 &separator1,
                 &mute_item,
+                &mute_ambiance_item,
                 &separator2,
                 &github_item,
                 &discord_item,
@@ -179,6 +189,7 @@ impl TrayManager {
         Ok(TrayManager {
             tray_icon,
             mute_item,
+            mute_ambiance_item,
             icons,
         })
     }
@@ -191,13 +202,19 @@ impl TrayManager {
     pub fn update_menu(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let config = crate::state::config_writer::current();
         let enabled = config.enable_sound;
+        let ambiance_muted = config.ambiance_is_muted;
 
-        // Mutate the existing item instead of rebuilding the menu: the label is
-        // fixed, only the checkmark moves.
+        // Mutate the existing items instead of rebuilding the menu: the labels are
+        // fixed, only the checkmarks move.
         self.mute_item.set_checked(!enabled);
+        self.mute_ambiance_item.set_checked(ambiance_muted);
         self.tray_icon.set_icon(Some(self.icons.for_sound_enabled(enabled)))?;
 
-        crate::always_print!("🔄 Tray updated: sounds {}", if enabled { "on" } else { "muted" });
+        crate::always_print!(
+            "🔄 Tray updated: sounds {}, ambiance {}",
+            if enabled { "on" } else { "muted" },
+            if ambiance_muted { "muted" } else { "on" }
+        );
 
         Ok(())
     }
@@ -252,6 +269,10 @@ pub fn handle_tray_events() -> Option<TrayMessage> {
             "toggle_mute" => {
                 crate::always_print!("🔇 Tray menu: Toggle Mute clicked");
                 return Some(TrayMessage::ToggleMute);
+            }
+            "toggle_mute_ambiance" => {
+                crate::always_print!("🔇 Tray menu: Toggle Mute Ambiance clicked");
+                return Some(TrayMessage::ToggleMuteAmbiance);
             }
             "github" => {
                 crate::always_print!("🐙 Tray menu: GitHub Repository clicked");
