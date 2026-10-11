@@ -59,29 +59,31 @@ unsafe fn create_permissive_security_attributes() -> (
     Option<winapi::um::minwinbase::SECURITY_ATTRIBUTES>,
     Option<Box<winapi::um::winnt::SECURITY_DESCRIPTOR>>,
 ) {
-    let mut sd = Box::new(std::mem::zeroed::<winapi::um::winnt::SECURITY_DESCRIPTOR>());
-    if winapi::um::securitybaseapi::InitializeSecurityDescriptor(
-        sd.as_mut() as *mut _ as *mut _,
-        winapi::um::winnt::SECURITY_DESCRIPTOR_REVISION,
-    ) == 0
-    {
-        return (None, None);
+    unsafe {
+        let mut sd = Box::new(std::mem::zeroed::<winapi::um::winnt::SECURITY_DESCRIPTOR>());
+        if winapi::um::securitybaseapi::InitializeSecurityDescriptor(
+            sd.as_mut() as *mut _ as *mut _,
+            winapi::um::winnt::SECURITY_DESCRIPTOR_REVISION,
+        ) == 0
+        {
+            return (None, None);
+        }
+        if winapi::um::securitybaseapi::SetSecurityDescriptorDacl(
+            sd.as_mut() as *mut _ as *mut _,
+            1,
+            null_mut(),
+            0,
+        ) == 0
+        {
+            return (None, None);
+        }
+        let sa = winapi::um::minwinbase::SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<winapi::um::minwinbase::SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.as_mut() as *mut _ as *mut _,
+            bInheritHandle: 0,
+        };
+        (Some(sa), Some(sd))
     }
-    if winapi::um::securitybaseapi::SetSecurityDescriptorDacl(
-        sd.as_mut() as *mut _ as *mut _,
-        1,
-        null_mut(),
-        0,
-    ) == 0
-    {
-        return (None, None);
-    }
-    let sa = winapi::um::minwinbase::SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<winapi::um::minwinbase::SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: sd.as_mut() as *mut _ as *mut _,
-        bInheritHandle: 0,
-    };
-    (Some(sa), Some(sd))
 }
 
 /// Builds a lock name unique to this executable, so only *the same build*
@@ -205,11 +207,10 @@ pub fn listen_for_instance_events(
         return;
     }
 
-    let wake_event = WakeEvent(wake_handle);
-    let quit_event = WakeEvent(quit_handle);
+    let pair = EventPair(wake_handle, quit_handle);
 
     std::thread::spawn(move || {
-        let events = [wake_event.0, quit_event.0];
+        let events = pair.handles();
         loop {
             let result = unsafe {
                 WaitForMultipleObjects(
@@ -241,12 +242,31 @@ pub fn listen_for_wake_requests(on_wake: impl Fn() + Send + 'static) {
     });
 }
 
-/// Owns the wake-up / quit event handle so it can cross the thread boundary.
-struct WakeEvent(HANDLE);
+/// Owns the wake-up and quit event handles so they can cross the thread boundary safely.
+struct EventPair(HANDLE, HANDLE);
 
-// SAFETY: the handle is only touched by the listener thread that takes
-// ownership of it; Windows handles are process-wide, so the move is sound.
-unsafe impl Send for WakeEvent {}
+// SAFETY: the handles are only touched by the listener thread that takes
+// ownership of them; Windows handles are process-wide, so the move is sound.
+unsafe impl Send for EventPair {}
+
+impl EventPair {
+    fn handles(&self) -> [HANDLE; 2] {
+        [self.0, self.1]
+    }
+}
+
+impl Drop for EventPair {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_null() {
+                CloseHandle(self.0);
+            }
+            if !self.1.is_null() {
+                CloseHandle(self.1);
+            }
+        }
+    }
+}
 
 /// Holds the instance lock for as long as it is alive. Windows frees the
 /// underlying mutex on process exit even if this is never dropped (a crash,
