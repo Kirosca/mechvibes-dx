@@ -111,6 +111,13 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; the user who owns the tray and audio session, not as admin.
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser skipifnotsilent
 
+; Create elevated scheduled task for startup if task is selected
+Filename: "schtasks.exe"; Parameters: "/create /tn ""{#MyAppName}"" /tr """"{app}\{#MyAppExeName}"" --minimized"" /sc onlogon /rl highest /f"; Flags: runhidden; Tasks: startup
+
+[UninstallRun]
+; Remove scheduled task upon uninstallation
+Filename: "schtasks.exe"; Parameters: "/delete /tn ""{#MyAppName}"" /f"; Flags: runhidden; RunOnceId: "DelScheduledTask"
+
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
 Type: filesandordirs; Name: "{userappdata}\Mechvibes"

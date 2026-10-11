@@ -18,7 +18,7 @@ use std::ptr::null_mut;
 
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::CloseHandle;
-use winapi::um::synchapi::{ CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject };
+use winapi::um::synchapi::{ CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, WaitForMultipleObjects };
 use winapi::um::winnt::{ EVENT_MODIFY_STATE, HANDLE };
 
 /// Session-local (`Local\`) so two different users logged into the same
@@ -32,6 +32,10 @@ const MUTEX_PREFIX: &str = r"Local\MechvibesDX-SingleInstance-";
 /// launch must never surface another user's window.
 const WAKE_EVENT_PREFIX: &str = r"Local\MechvibesDX-ShowWindow-";
 
+/// Event an elevated second instance sets to ask the lower-privileged
+/// instance to gracefully terminate so the elevated instance can take over.
+const QUIT_EVENT_PREFIX: &str = r"Local\MechvibesDX-Quit-";
+
 /// `ERROR_ALREADY_EXISTS`. Defined here rather than pulled from winapi's
 /// `winerror` module, which this crate does not enable as a feature; the
 /// value is fixed by the Win32 ABI.
@@ -41,9 +45,44 @@ const ERROR_ALREADY_EXISTS: u32 = 183;
 /// Same rationale as `ERROR_ALREADY_EXISTS`: fixed by the Win32 ABI.
 const WAIT_OBJECT_0: u32 = 0;
 
+/// `WAIT_ABANDONED` - the mutex was abandoned by the terminating instance.
+const WAIT_ABANDONED: u32 = 0x0000_0080;
+
 /// `INFINITE` - wait without timeout. Defined here for the same reason as the
 /// constants above: winapi's `winbase` feature is not enabled by this crate.
 const INFINITE: u32 = 0xffff_ffff;
+
+/// Create a SECURITY_ATTRIBUTES struct with a NULL DACL so that processes of
+/// different integrity levels (e.g. Medium vs High/Admin) within the same user
+/// session can open and signal mutual sync events.
+unsafe fn create_permissive_security_attributes() -> (
+    Option<winapi::um::minwinbase::SECURITY_ATTRIBUTES>,
+    Option<Box<winapi::um::winnt::SECURITY_DESCRIPTOR>>,
+) {
+    let mut sd = Box::new(std::mem::zeroed::<winapi::um::winnt::SECURITY_DESCRIPTOR>());
+    if winapi::um::securitybaseapi::InitializeSecurityDescriptor(
+        sd.as_mut() as *mut _ as *mut _,
+        winapi::um::winnt::SECURITY_DESCRIPTOR_REVISION,
+    ) == 0
+    {
+        return (None, None);
+    }
+    if winapi::um::securitybaseapi::SetSecurityDescriptorDacl(
+        sd.as_mut() as *mut _ as *mut _,
+        1,
+        null_mut(),
+        0,
+    ) == 0
+    {
+        return (None, None);
+    }
+    let sa = winapi::um::minwinbase::SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<winapi::um::minwinbase::SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.as_mut() as *mut _ as *mut _,
+        bInheritHandle: 0,
+    };
+    (Some(sa), Some(sd))
+}
 
 /// Builds a lock name unique to this executable, so only *the same build*
 /// blocks itself. Two copies of the installed app still refuse to co-run,
@@ -88,6 +127,12 @@ fn wake_event_name() -> String {
     format!("{}{:x}", WAKE_EVENT_PREFIX, exe_hash())
 }
 
+/// Name of the event an elevated replacing instance sets to ask the running
+/// instance to exit.
+fn quit_event_name() -> String {
+    format!("{}{:x}", QUIT_EVENT_PREFIX, exe_hash())
+}
+
 /// Encode a name for the Win32 `*W` APIs.
 fn wide(value: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
@@ -120,47 +165,83 @@ pub fn signal_running_instance() {
     }
 }
 
-/// Watch for a second launch and run `on_wake` each time one happens.
-///
-/// Spawns a detached thread blocking on the event rather than polling, so an
-/// idle app costs nothing. The event is auto-reset, so each launch delivers
-/// exactly one wake-up.
-///
-/// Only the instance holding the single-instance lock should call this.
-pub fn listen_for_wake_requests(on_wake: impl Fn() + Send + 'static) {
-    let name = wide(&wake_event_name());
+/// Signal the running instance to quit gracefully so this new (elevated) instance
+/// can take over.
+pub fn signal_quit_instance() {
+    let name = wide(&quit_event_name());
 
-    // SAFETY: `name` outlives the call. `CreateEventW` with a null security
-    // descriptor and manual_reset = 0 yields an auto-reset event owned by this
-    // process; a null return means the event could not be created, in which
-    // case the thread is simply not started.
-    let handle = unsafe { CreateEventW(null_mut(), 0, 0, name.as_ptr()) };
-    if handle.is_null() {
-        crate::always_eprint!("⚠️ Could not create the wake-up event; a second launch will not raise the window");
+    unsafe {
+        let handle = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if handle.is_null() {
+            return;
+        }
+        SetEvent(handle);
+        CloseHandle(handle);
+    }
+}
+
+/// Watch for wake-up and quit events from other launches.
+pub fn listen_for_instance_events(
+    on_wake: impl Fn() + Send + 'static,
+    on_quit: impl Fn() + Send + 'static,
+) {
+    let wake_name = wide(&wake_event_name());
+    let quit_name = wide(&quit_event_name());
+
+    let (sa, _sd) = unsafe { create_permissive_security_attributes() };
+    let sa_ptr = sa.as_ref().map(|s| s as *const _ as *mut _).unwrap_or(null_mut());
+
+    let wake_handle = unsafe { CreateEventW(sa_ptr, 0, 0, wake_name.as_ptr()) };
+    let quit_handle = unsafe { CreateEventW(sa_ptr, 0, 0, quit_name.as_ptr()) };
+
+    if wake_handle.is_null() || quit_handle.is_null() {
+        if !wake_handle.is_null() {
+            unsafe { CloseHandle(wake_handle); }
+        }
+        if !quit_handle.is_null() {
+            unsafe { CloseHandle(quit_handle); }
+        }
+        crate::always_eprint!("⚠️ Could not create single-instance events");
         return;
     }
 
-    // The handle is moved onto the listener thread, which owns it for the
-    // life of the process. Windows reclaims it on exit.
-    let handle = WakeEvent(handle);
+    let wake_event = WakeEvent(wake_handle);
+    let quit_event = WakeEvent(quit_handle);
 
     std::thread::spawn(move || {
-        let event = handle;
+        let events = [wake_event.0, quit_event.0];
         loop {
-            // SAFETY: the handle is valid for as long as this thread runs and
-            // is not used from anywhere else.
-            let result = unsafe { WaitForSingleObject(event.0, INFINITE) };
-            if result != WAIT_OBJECT_0 {
-                // Abandoned or failed wait: nothing left to listen to, so stop
-                // rather than spin on an unusable handle.
+            let result = unsafe {
+                WaitForMultipleObjects(
+                    2,
+                    events.as_ptr(),
+                    0,
+                    INFINITE,
+                )
+            };
+
+            if result == WAIT_OBJECT_0 {
+                on_wake();
+            } else if result == WAIT_OBJECT_0 + 1 {
+                crate::always_print!("🛑 Received quit request from another instance; exiting");
+                on_quit();
+                break;
+            } else {
                 break;
             }
-            on_wake();
         }
     });
 }
 
-/// Owns the wake-up event handle so it can cross the thread boundary.
+/// Watch for a second launch and run `on_wake` each time one happens.
+/// If a quit request arrives, the process exits cleanly.
+pub fn listen_for_wake_requests(on_wake: impl Fn() + Send + 'static) {
+    listen_for_instance_events(on_wake, || {
+        std::process::exit(0);
+    });
+}
+
+/// Owns the wake-up / quit event handle so it can cross the thread boundary.
 struct WakeEvent(HANDLE);
 
 // SAFETY: the handle is only touched by the listener thread that takes
@@ -188,23 +269,35 @@ impl Drop for InstanceGuard {
 /// app already holds it - in which case the caller should exit without
 /// starting anything.
 ///
-/// The input worker must NOT call this: it is a child of an instance that
-/// already holds the lock, and would always be refused.
+/// If this copy is running with elevated administrator privileges, it signals
+/// the existing instance to exit and attempts to take over the mutex.
 pub fn acquire() -> Option<InstanceGuard> {
     let name = wide(&mutex_name());
 
-    let handle = unsafe { CreateMutexW(null_mut(), 0, name.as_ptr()) };
+    let (sa, _sd) = unsafe { create_permissive_security_attributes() };
+    let sa_ptr = sa.as_ref().map(|s| s as *const _ as *mut _).unwrap_or(null_mut());
+
+    let handle = unsafe { CreateMutexW(sa_ptr, 0, name.as_ptr()) };
 
     if handle.is_null() {
-        // Can't tell whether another instance exists, so let this one run:
-        // a spurious refusal to start is worse than a possible double.
         return Some(InstanceGuard(null_mut()));
     }
 
-    // The handle is returned even when the mutex already existed, so the
-    // error code is what distinguishes "we created it" from "someone else
-    // owns it" - and the handle still has to be closed either way.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // If THIS instance is running as administrator, ask the existing instance to quit and take over
+        if crate::utils::platform::is_elevated() {
+            crate::always_print!("⚡ Elevated instance detected existing instance; signaling it to quit...");
+            signal_quit_instance();
+
+            // Wait up to 3000ms for the other instance to terminate and release the mutex
+            let wait_res = unsafe { WaitForSingleObject(handle, 3000) };
+            if wait_res == WAIT_OBJECT_0 || wait_res == WAIT_ABANDONED {
+                crate::always_print!("✅ Successfully took over single-instance mutex as elevated process");
+                return Some(InstanceGuard(handle));
+            }
+            crate::always_eprint!("⚠️ Timed out waiting for running instance to exit");
+        }
+
         unsafe {
             CloseHandle(handle);
         }
@@ -213,3 +306,4 @@ pub fn acquire() -> Option<InstanceGuard> {
 
     Some(InstanceGuard(handle))
 }
+

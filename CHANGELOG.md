@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.2-v1.2] - 2026-10-11
+
+### Added / Changed
+
+- **Task Scheduler Highest Privileges Autostart.** "Start with Windows" now registers a scheduled task with highest runlevel (`/rl highest`), enabling silent, UAC-free autostart with administrative privileges on Windows logon so keys are captured across all elevated windows (e.g. Everything, Task Manager).
+- **Restart as Administrator Tray Option.** Added a "Restart as Administrator" menu item to the system tray context menu, allowing one-click elevation.
+- **Single-Instance Mutex Elevated Takeover.** Upgraded single-instance synchronization to allow elevated instances to gracefully signal existing lower-privileged instances to quit and take over the mutex seamlessly.
+
 ## [0.8.2-v1.1] - 2026-09-08
 
 ### Added / Changed

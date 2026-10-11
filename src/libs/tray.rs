@@ -25,6 +25,7 @@ pub enum TrayMessage {
     Exit,
     ToggleMute,
     ToggleMuteAmbiance,
+    RestartAsAdmin,
     OpenGitHub,
     OpenDiscord,
     OpenWebsite,
@@ -122,6 +123,22 @@ impl TrayManager {
             true,
             None
         );
+        let is_admin = crate::utils::platform::is_elevated();
+        let admin_item = if is_admin {
+            MenuItem::with_id(
+                MenuId::new("restart_as_admin"),
+                "Running as Administrator ✓",
+                false,
+                None,
+            )
+        } else {
+            MenuItem::with_id(
+                MenuId::new("restart_as_admin"),
+                "Restart as Administrator",
+                true,
+                None,
+            )
+        };
         let separator1 = PredefinedMenuItem::separator();
 
         // Sound control section. Fixed label; the checkmark carries the state.
@@ -163,6 +180,7 @@ impl TrayManager {
         let menu = Menu::with_items(
             &[
                 &show_item,
+                &admin_item,
                 &separator1,
                 &mute_item,
                 &mute_ambiance_item,
@@ -274,6 +292,10 @@ pub fn handle_tray_events() -> Option<TrayMessage> {
             "toggle_mute_ambiance" => {
                 crate::always_print!("🔇 Tray menu: Toggle Mute Ambiance clicked");
                 return Some(TrayMessage::ToggleMuteAmbiance);
+            }
+            "restart_as_admin" => {
+                crate::always_print!("⚡ Tray menu: Restart as Administrator clicked");
+                return Some(TrayMessage::RestartAsAdmin);
             }
             "github" => {
                 crate::always_print!("🐙 Tray menu: GitHub Repository clicked");

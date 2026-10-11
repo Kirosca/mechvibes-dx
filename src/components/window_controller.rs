@@ -187,6 +187,21 @@ pub fn WindowController() -> Element {
                                 crate::always_print!("🌐 Opened official website in browser");
                             }
                         }
+                        TrayMessage::RestartAsAdmin => {
+                            crate::always_print!("⚡ Tray: Restart as Administrator requested");
+                            #[cfg(target_os = "windows")]
+                            {
+                                match crate::utils::platform::restart_as_administrator() {
+                                    Ok(_) => {
+                                        crate::always_print!("👋 Successfully launched elevated instance; exiting current instance");
+                                        window_clone.close();
+                                    }
+                                    Err(e) => {
+                                        crate::always_eprint!("❌ Failed to restart as administrator: {}", e);
+                                    }
+                                }
+                            }
+                        }
                         TrayMessage::Exit => {
                             crate::always_print!("📢 Tray: Exit requested - closing application");
                             // Close the window which will trigger app exit

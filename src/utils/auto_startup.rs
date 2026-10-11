@@ -7,27 +7,146 @@ use winreg::enums::*;
 #[cfg(target_os = "windows")]
 use winreg::RegKey;
 
+#[cfg(target_os = "windows")]
+const TASK_NAME: &str = APP_NAME;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Get the current executable path
 fn get_exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))
 }
 
-/// Enable auto startup on Windows
 #[cfg(target_os = "windows")]
-pub fn enable_auto_startup() -> Result<(), String> {
-    let exe_path = get_exe_path()?;
-    let exe_path_str = exe_path.to_str().ok_or("Failed to convert executable path to string")?;
+fn run_elevated_schtasks(args: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::GetExitCodeProcess;
+    use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use winapi::um::synchapi::WaitForSingleObject;
+    use winapi::um::winuser::SW_HIDE;
 
-    // Check if we should start minimized. Read from the config authority, not
-    // the file: the Settings toggle calls this immediately after writing
-    // `start_minimized`, and a re-parse could race that write.
-    let config = crate::state::config_writer::current();
-    let command = if config.start_minimized {
-        format!("\"{}\" --minimized", exe_path_str)
-    } else {
-        exe_path_str.to_string()
+    let prog_wide: Vec<u16> = std::ffi::OsStr::new("schtasks.exe")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let args_wide: Vec<u16> = std::ffi::OsStr::new(args)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let verb_wide: Vec<u16> = std::ffi::OsStr::new("runas")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        hwnd: null_mut(),
+        lpVerb: verb_wide.as_ptr(),
+        lpFile: prog_wide.as_ptr(),
+        lpParameters: args_wide.as_ptr(),
+        lpDirectory: null_mut(),
+        nShow: SW_HIDE,
+        hInstApp: null_mut(),
+        lpIDList: null_mut(),
+        lpClass: null_mut(),
+        hkeyClass: null_mut(),
+        dwHotKey: 0,
+        hMonitor: null_mut(),
+        hProcess: null_mut(),
     };
 
+    unsafe {
+        if ShellExecuteExW(&mut sei) != 0 && !sei.hProcess.is_null() {
+            WaitForSingleObject(sei.hProcess, 10000);
+            let mut exit_code: u32 = 0;
+            GetExitCodeProcess(sei.hProcess, &mut exit_code);
+            CloseHandle(sei.hProcess);
+            exit_code == 0
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn try_create_scheduled_task(command: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let status = Command::new("schtasks")
+        .args(&[
+            "/create",
+            "/tn",
+            TASK_NAME,
+            "/tr",
+            command,
+            "/sc",
+            "onlogon",
+            "/rl",
+            "highest",
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+
+    if let Ok(s) = status {
+        if s.success() {
+            return true;
+        }
+    }
+
+    if !crate::utils::platform::is_elevated() {
+        let args = format!(
+            "/create /tn \"{}\" /tr \"{}\" /sc onlogon /rl highest /f",
+            TASK_NAME, command
+        );
+        return run_elevated_schtasks(&args);
+    }
+
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn try_delete_scheduled_task() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let status = Command::new("schtasks")
+        .args(&["/delete", "/tn", TASK_NAME, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+
+    if let Ok(s) = status {
+        if s.success() {
+            crate::always_print!("✅ Scheduled task auto-startup deleted");
+            return;
+        }
+    }
+
+    if is_scheduled_task_present() && !crate::utils::platform::is_elevated() {
+        let args = format!("/delete /tn \"{}\" /f", TASK_NAME);
+        let _ = run_elevated_schtasks(&args);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_scheduled_task_present() -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    Command::new("schtasks")
+        .args(&["/query", "/tn", TASK_NAME])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn set_registry_run_entry(command: &str) -> Result<(), String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let run_key = hkcu
         .open_subkey_with_flags("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_WRITE)
@@ -37,68 +156,29 @@ pub fn enable_auto_startup() -> Result<(), String> {
         .set_value(APP_NAME, &command)
         .map_err(|e| format!("Failed to set registry value: {}", e))?;
 
-    crate::always_print!("✅ Auto startup enabled: {}", command);
     Ok(())
 }
 
-/// Disable auto startup on Windows
 #[cfg(target_os = "windows")]
-pub fn disable_auto_startup() -> Result<(), String> {
+fn remove_registry_run_entry() -> Result<(), String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let run_key = hkcu
         .open_subkey_with_flags("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_WRITE)
         .map_err(|e| format!("Failed to open registry key: {}", e))?;
 
     match run_key.delete_value(APP_NAME) {
-        Ok(_) => {
-            crate::always_print!("✅ Auto startup disabled");
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Entry doesn't exist, which is fine
-            crate::always_print!("ℹ️ Auto startup was not enabled");
-            Ok(())
-        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("Failed to delete registry value: {}", e)),
     }
 }
 
-/// Pull the executable path back out of a registry Run command line.
-///
-/// `enable_auto_startup` writes two shapes depending on `start_minimized`:
-/// a bare path, or `"path" --minimized`. Comparing the whole value against
-/// the bare path only ever matches the first shape, so with "start minimized"
-/// on the check reported "not enabled" for an entry it had just written -
-/// and `AppConfig::load` then "synced" `auto_start` back to false and saved.
-/// Both shapes have to round-trip.
-fn exe_path_from_run_command(command: &str) -> &str {
-    let command = command.trim();
-
-    // Quoted form: take what is between the first pair of quotes and ignore
-    // any arguments that follow.
-    if let Some(rest) = command.strip_prefix('"') {
-        return match rest.find('"') {
-            Some(end) => &rest[..end],
-            // Unbalanced quote - no sane reading, treat the remainder as path.
-            None => rest,
-        };
-    }
-
-    // Unquoted form is written without arguments, so the whole value is the
-    // path. Splitting on whitespace here would break paths like
-    // `C:\Program Files\...`.
-    command
-}
-
-/// Check if auto startup is currently enabled
 #[cfg(target_os = "windows")]
-pub fn is_auto_startup_enabled() -> bool {
+fn is_registry_run_present() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let run_key = match hkcu.open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run") {
         Ok(key) => key,
-        Err(_) => {
-            return false;
-        }
+        Err(_) => return false,
     };
 
     match run_key.get_value::<String, _>(APP_NAME) {
@@ -106,19 +186,68 @@ pub fn is_auto_startup_enabled() -> bool {
             let current_exe = get_exe_path().unwrap_or_default();
             let current_exe_str = match current_exe.to_str() {
                 Some(path) if !path.is_empty() => path,
-                // Without a path to compare against, "" would match a "" value
-                // and claim auto start is on for an entry pointing elsewhere.
-                _ => {
-                    return false;
-                }
+                _ => return false,
             };
 
-            // Windows paths are case-insensitive, and the registry value was
-            // written by a possibly different-cased invocation of this exe.
             exe_path_from_run_command(&value).eq_ignore_ascii_case(current_exe_str)
         }
         Err(_) => false,
     }
+}
+
+/// Enable auto startup on Windows (prefers Task Scheduler with highest privileges)
+#[cfg(target_os = "windows")]
+pub fn enable_auto_startup() -> Result<(), String> {
+    let exe_path = get_exe_path()?;
+    let exe_path_str = exe_path.to_str().ok_or("Failed to convert executable path to string")?;
+
+    let config = crate::state::config_writer::current();
+    let command = if config.start_minimized {
+        format!("\"{}\" --minimized", exe_path_str)
+    } else {
+        exe_path_str.to_string()
+    };
+
+    if try_create_scheduled_task(&command) {
+        crate::always_print!("✅ Auto startup enabled via Task Scheduler (highest privileges): {}", command);
+        let _ = remove_registry_run_entry();
+        return Ok(());
+    }
+
+    set_registry_run_entry(&command)?;
+    crate::always_print!("✅ Auto startup enabled via registry fallback: {}", command);
+    Ok(())
+}
+
+/// Disable auto startup on Windows
+#[cfg(target_os = "windows")]
+pub fn disable_auto_startup() -> Result<(), String> {
+    try_delete_scheduled_task();
+    remove_registry_run_entry()
+}
+
+/// Pull the executable path back out of a registry Run command line.
+fn exe_path_from_run_command(command: &str) -> &str {
+    let command = command.trim();
+
+    if let Some(rest) = command.strip_prefix('"') {
+        return match rest.find('"') {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+    }
+
+    command
+}
+
+/// Check if auto startup is currently enabled
+#[cfg(target_os = "windows")]
+pub fn is_auto_startup_enabled() -> bool {
+    if is_scheduled_task_present() {
+        return true;
+    }
+
+    is_registry_run_present()
 }
 
 /// Set auto startup state (enable or disable)
